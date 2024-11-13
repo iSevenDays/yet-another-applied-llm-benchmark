@@ -4,9 +4,6 @@ FROM ubuntu:22.04
 # Set ARG for TARGETPLATFORM
 ARG TARGETPLATFORM
 
-# Add the deadsnakes PPA, which contains newer Python versions
-RUN add-apt-repository ppa:deadsnakes/ppa
-
 # Update the system and install Python and build dependencies
 RUN apt-get update && apt-get install -y \
     software-properties-common \
@@ -25,6 +22,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 ENV DEBIAN_FRONTEND noninteractive
+
+# Add the deadsnakes PPA, which contains newer Python versions
+RUN add-apt-repository ppa:deadsnakes/ppa
 
 # Install Python 3.12
 RUN apt-get update && apt-get install -y \
