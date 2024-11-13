@@ -27,7 +27,8 @@ from llms.mistral_model import MistralModel
 from llms.vertexai_model import VertexAIModel
 from llms.cohere_model import CohereModel
 from llms.moonshot_model import MoonshotAIModel
-from  llms.groq_model import GroqModel
+from llms.groq_model import GroqModel
+from llms.ollama_model import OllamaModel
 
 class LLM:
     def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams={}):
@@ -36,6 +37,9 @@ class LLM:
             self.model = OpenAIModel(name)
         # elif 'llama' in name:
         #     self.model = LLAMAModel(name)
+        elif name.startswith('ollama_'):
+            model = name.replace('ollama_', '')
+            self.model = OllamaModel(model)
         elif 'mistral' in name:
             self.model = MistralModel(name)
         elif 'bison' in name or 'gemini' in name:
@@ -118,7 +122,9 @@ class LLM:
         return response
 
 #llm = LLM("command")
-#llm = LLM("gpt-3.5-turbo")
+#llm = """LLM("gpt-3.5-turbo")"""
+
+llm = LLM("ollama_ollama_deepseek-coder-v2")
 #llm = LLM("gpt-4-turbo-2024-04-09")
 #llm = LLM("gemini-1.5-pro-preview-0409")
 llm = LLM("o1-mini")
@@ -130,7 +136,8 @@ llm = LLM("o1-mini")
 #llm = LLM("gemini-pro", override_hparams={'temperature': 0.3}, use_cache=False)
 
 #eval_llm = LLM("gpt-4-1106-preview")
-eval_llm = LLM("gpt-4o", override_hparams={'temperature': 0.1})
+#eval_llm = LLM("gpt-4o", override_hparams={'temperature': 0.1})
+eval_llm = LLM("ollama_ollama_deepseek-coder-v2", override_hparams={'temperature': 0.1})
 #eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
 
 vision_eval_llm = LLM("gpt-4o", override_hparams={'temperature': 0.1})

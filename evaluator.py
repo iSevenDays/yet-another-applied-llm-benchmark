@@ -301,7 +301,10 @@ class SubstringEvaluator(Node):
         if self.lower:
             cond = self.substr.lower() in output.lower()
         else:
-            cond = self.substr in output
+            try:
+                cond = self.substr in output
+            except Exception as exc:
+                print(f'Error: {exc}, substr: {self.substr}, output: {output}')
             
         if cond:
             yield True, Reason(type(self), [self.substr, True])
@@ -503,6 +506,29 @@ class PythonRun(Node):
         out = invoke_docker(self.env, {"main.py": code.encode()}, [PYTHON_ENV, "main.py"], out_bytes=self.out_bytes)
         yield out, Reason(type(self), (code, out))
 
+class SwiftRun(Node):
+    def __init__(self, test_case="", out_bytes=False):
+        self.test_case = test_case
+        self.env = None
+        self.out_bytes = out_bytes
+
+    def __call__(self, code):
+        if self.env is None:
+            self.env = type('', (), {})()
+            self.env.docker = None
+
+        code = code + "\n\n" + self.test_case
+        
+        files = {
+            'main.swift': code.encode('utf-8')
+        }
+
+        run_cmd = ["swift", "main.swift"]
+        
+        output = invoke_docker(self.env, files, run_cmd, out_bytes=self.out_bytes)
+        
+        yield output, Reason(type(self), (code, output))
+    
 class SQLRun(Node):
     """
     A node that runs the output from the prior command as a sqlite function.
@@ -691,6 +717,7 @@ class SeleniumDraw(Node):
             #chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-search-engine-choice-screen")
     
             r = random.randint(0, 1000000)
             
@@ -852,7 +879,32 @@ assert answer == expected, f'Wrong answer; got {{answer}} instead of {{expected}
     qs.append("print('All tests passed')")
 
     return "\n".join(qs), "All tests passed"
+
+def make_swift_test(q_and_a, header="", extra_methods=""):
+    qs = [header, extra_methods]
     
+    qs.append("""
+import Foundation
+
+func assert(_ condition: Bool, _ message: String) {
+    guard condition else {
+        print(message)
+        exit(1)
+    }
+}
+
+""")
+
+    for q, a in q_and_a:
+        qs.append(f"""
+let answer = {q}
+let expected = {a}
+assert(answer == expected, "Wrong answer; got \\(answer) instead of \\(expected)")
+""")
+    
+    qs.append('print("All tests passed")')
+
+    return "\n".join(qs), "All tests passed"
 
 def make_c_test(q_and_a, header="", extra_methods=""):
     qs = []

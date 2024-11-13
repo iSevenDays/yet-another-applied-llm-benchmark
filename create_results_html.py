@@ -72,7 +72,7 @@ def format_markdown(reason, indent=0):
         return f"{pounds} HTML Render\nRendering the webpage gives the following image:\n{reason.children}\n"
     elif reason.node in (LLMRun, LLMVisionRun, LLMConversation):
         return f"{pounds} LLM Generation\n#{pounds} Query\n{fix(reason.children[0].strip())}\n#{pounds} Output\n{fix(reason.children[1].strip())}\n"
-    elif reason.node in (PythonRun, CRun, CppRun, RustRun, BashRun, TerminalRun, SQLRun):
+    elif reason.node in (PythonRun, CRun, CppRun, RustRun, BashRun, TerminalRun, SQLRun, SwiftRun):
         return f"{pounds} Run Code Interpreter\nRunning the following program:\n> ```\n{fix(reason.children[0].strip())}\n> ```\nAnd got the output:\n```\n{reason.children[1]}\n```\n"
     elif reason.node == ExtractCode:
         return f"{pounds} Extract Code\nI extracted the following code from that output:\n> ```\n{fix(reason.children.strip())}\n> ```\n"
@@ -157,8 +157,15 @@ def generate_report(data, tags, descriptions):
         row_means = (score_table * (row_weight_vec[:,None] + .1)).mean(0)
         column_means = (score_table / (col_weight_vec[None,:] + .1)).mean(1)
 
-        col_weight_vec = row_means/row_means.mean()
-        row_weight_vec = column_means/column_means.mean()
+        if row_means.mean() != 0:
+            col_weight_vec = row_means / row_means.mean()
+        else:
+            col_weight_vec = np.zeros_like(row_means)
+
+        if column_means.mean() != 0:
+            row_weight_vec = column_means / column_means.mean()
+        else:
+            row_weight_vec = np.zeros_like(column_means)
 
     row_means_, column_means_ = row_means, column_means
     

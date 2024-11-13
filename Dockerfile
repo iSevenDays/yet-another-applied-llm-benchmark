@@ -1,9 +1,8 @@
 # Use an official Ubuntu as a parent image
-FROM ubuntu:latest
+FROM ubuntu:22.04
 
-# Update the system and install dependencies
-RUN apt-get update && apt-get install -y \
-    software-properties-common
+# Set ARG for TARGETPLATFORM
+ARG TARGETPLATFORM
 
 # Add the deadsnakes PPA, which contains newer Python versions
 RUN add-apt-repository ppa:deadsnakes/ppa
@@ -16,7 +15,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     sqlite3 \
     gdb \
-    libssl-dev
+    libssl-dev \
+    wget \
+    clang \
+    libxml2-dev \
+    libncurses5-dev \
+    pkg-config \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV DEBIAN_FRONTEND noninteractive
 
@@ -44,13 +50,38 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # Ensure Rust binaries are in PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Install Swift based on the target platform
+RUN set -ex && \
+    SWIFT_PLATFORM=ubuntu22.04 && \
+    SWIFT_BRANCH=swift-5.9.2-release && \
+    SWIFT_VERSION=swift-5.9.2-RELEASE && \
+    SWIFT_WEBROOT=https://download.swift.org && \
+    case "$TARGETPLATFORM" in \
+        linux/amd64) \
+            SWIFT_WEBDIR="$SWIFT_WEBROOT/$SWIFT_BRANCH/$(echo $SWIFT_PLATFORM | tr -d .)/$SWIFT_VERSION" && \
+            SWIFT_BIN_URL="$SWIFT_WEBDIR/$SWIFT_VERSION-$SWIFT_PLATFORM.tar.gz" \
+            ;; \
+        linux/arm64*) \
+            SWIFT_WEBDIR="$SWIFT_WEBROOT/$SWIFT_BRANCH/$(echo $SWIFT_PLATFORM | tr -d .)-aarch64/$SWIFT_VERSION" && \
+            SWIFT_BIN_URL="$SWIFT_WEBDIR/$SWIFT_VERSION-$SWIFT_PLATFORM-aarch64.tar.gz" \
+            ;; \
+        *) \
+            echo "Unsupported architecture: $TARGETPLATFORM" && exit 1 \
+            ;; \
+    esac && \
+    wget -q $SWIFT_BIN_URL && \
+    tar xzf ${SWIFT_VERSION}-${SWIFT_PLATFORM}*.tar.gz --directory / --strip-components=1 && \
+    rm ${SWIFT_VERSION}-${SWIFT_PLATFORM}*.tar.gz && \
+    swift --version
+
+# Add Swift to PATH
+ENV PATH="/usr/share/swift/usr/bin:${PATH}"
+
 # Create a symlink for python3
-RUN ln -s /usr/bin/python3 /usr/bin/python
+RUN ln -s /usr/bin/python3.12 /usr/bin/python
 
 # Set the working directory in the container
 WORKDIR /usr/src/app
-
-# Any additional commands or environment variables can be added here
 
 # Command to run when the container launches
 CMD ["/bin/bash"]

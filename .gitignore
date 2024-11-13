@@ -1,1 +1,7 @@
 .API_KEY
+evaluation_examples
+llms/__pycache__
+results
+tests/__pycache__
+.aider*
+.env

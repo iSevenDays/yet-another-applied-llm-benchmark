@@ -23,7 +23,7 @@ import json
 import argparse
 import pickle
 import subprocess
-
+from tqdm import tqdm
 import create_results_html
 
 from evaluator import Env, Conversation, run_test
@@ -38,16 +38,25 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     env = Env()
     test.setup(env, Conversation(test_llm), test_llm, eval_llm, vision_eval_llm)
 
-    for success, output in test():
-        if success:
-            if env.container:
-                docker_controller.async_kill_container(env.docker, env.container)
-            return True, output
-        else:
-            pass
-    if env.container:
-        docker_controller.async_kill_container(env.docker, env.container)
-    return False, output
+    try:
+        for success, output in test():
+            if success:
+                if env.container:
+                    docker_controller.async_kill_container(env.docker, env.container)
+                return True, output
+        if env.container:
+            docker_controller.async_kill_container(env.docker, env.container)
+        return False, output
+    except GeneratorExit:
+        # Handle the case where the generator is closed prematurely
+        if env.container:
+            docker_controller.async_kill_container(env.docker, env.container)
+        return False, "Test was interrupted"
+    except Exception as e:
+        # Handle any other exceptions that might occur
+        if env.container:
+            docker_controller.async_kill_container(env.docker, env.container)
+        return False, f"An error occurred: {str(e)}"
                     
 
 def run_all_tests(test_llm, use_cache=True, which_tests=None):
@@ -56,38 +65,49 @@ def run_all_tests(test_llm, use_cache=True, which_tests=None):
     of the format { "test_name": (success, output) }
     """
     test_llm = llm.LLM(test_llm, use_cache=use_cache)
+    print(f'test_llm: {test_llm.name}')
+    print(f'llm.eval_llm: {llm.eval_llm.name}')
     sr = {}
-    for f in os.listdir("tests"):
-        if not f.endswith(".py"): continue
-        if which_tests is not None and f[:-3] not in which_tests:
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location(f[:-3], "tests/" + f)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        except:
-            print("SKIPPING TEST", f)
-            continue
-        test_case = [x for x in dir(module) if x.startswith("Test") and x != "TestCase"]
-        if len(test_case) == 0:
-            pass
-        else:
-            print(f)
+    
+    # Get the list of test files
+    test_files = [f for f in os.listdir("tests") if f.endswith(".py")]
+    if which_tests is not None:
+        test_files = [f for f in test_files if f[:-3] in which_tests]
+    
+    # Create a tqdm progress bar
+    with tqdm(total=len(test_files), desc="Running tests", unit="test") as pbar:
+        for f in test_files:
+            try:
+                spec = importlib.util.spec_from_file_location(f[:-3], "tests/" + f)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as exc:
+                print(f"SKIPPING TEST {f}, reason: {exc}")
+                pbar.update(1)
+                continue
+            
+            test_case = [x for x in dir(module) if x.startswith("Test") and x != "TestCase"]
+            if len(test_case) == 0:
+                pbar.update(1)
+                continue
+            
+            pbar.set_postfix_str(f"Current: {f}")
             for t in test_case:
-                print("Run Job", t)
                 tmp = sys.stdout
                 sys.stdout = open(os.devnull, 'w')
 
                 test = getattr(module, t)
-
                 ok, reason = run_one_test(test, test_llm, llm.eval_llm, llm.vision_eval_llm)
 
                 sys.stdout = tmp
                 if ok:
-                    print("Test Passes:", t)
+                    pbar.write(f"Test Passes: {t}")
                 else:
-                    print("Test Fails:", t, 'from', f)
+                    pbar.write(f"Test Fails: {t} from {f}")
                 sr[f+"."+t] = (ok, reason)
+            
+            pbar.update(1)
+    
     return sr
 
 
