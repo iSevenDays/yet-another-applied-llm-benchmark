@@ -103,7 +103,7 @@ def run_all_tests(test_llm, use_cache=True, which_tests=None):
                 if ok:
                     pbar.write(f"Test Passes: {t}")
                 else:
-                    pbar.write(f"Test Fails: {t} from {f}")
+                    pbar.write(f"Test Fails: {t} from {f}, reason: {reason}")
                 sr[f+"."+t] = (ok, reason)
             
             pbar.update(1)
