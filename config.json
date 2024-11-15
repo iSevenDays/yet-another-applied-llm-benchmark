@@ -1,5 +1,5 @@
 {
-    "container": "podman",
+    "container": "docker",
     "hparams": {
         "temperature": 0.7
     },
