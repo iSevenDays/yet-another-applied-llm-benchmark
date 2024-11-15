@@ -1,0 +1,32 @@
+{
+    "container": "podman",
+    "hparams": {
+        "temperature": 0.7
+    },
+    "llms": {
+        "vertexai": {
+            "project_id": "TODO"
+        },
+        "openai": {
+            "api_key": "sk-12345"
+        },
+        "mistral": {
+            "api_key": "TODO"
+        },
+        "cohere": {
+            "api_key": "TODO"
+        },
+        "anthropic": {
+            "api_key": "TODO"
+        },
+        "moonshot": {
+            "api_key": "TODO"
+        },
+        "groq": {
+            "api_key": "TODO"
+        },
+        "ollama": {
+            "api_base": "http://192.168.0.121:11434"
+        }
+    }
+}
