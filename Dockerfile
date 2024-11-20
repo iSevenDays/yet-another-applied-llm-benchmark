@@ -41,9 +41,9 @@ RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     python3.12 get-pip.py && \
     rm get-pip.py
 
+RUN python -m pip install --upgrade pip
 # Install required Python packages using pip
-RUN pip install numpy scipy numba Pillow jax jaxlib python-chess torch
-
+RUN pip install numpy scipy numba Pillow jax jaxlib python-chess torch && pip show numpy
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
@@ -77,8 +77,9 @@ RUN set -ex && \
 # Add Swift to PATH
 ENV PATH="/usr/share/swift/usr/bin:${PATH}"
 
-# Create a symlink for python3
-RUN ln -s /usr/bin/python3.12 /usr/bin/python
+# Create symlinks for python and python3
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3
 
 # Set the working directory in the container
 WORKDIR /usr/src/app
