@@ -1,6 +1,6 @@
 from evaluator import *
 
-DESCRIPTION = "Test if the model can identify a missing incredient in a recipe. Identifying incorrect steps is much harder than missing steps."
+DESCRIPTION = "Test if the model can identify a missing ingredient in a recipe. Identifying incorrect steps is much harder than missing steps."
 
 TAGS = ['explain', 'fun']
 
