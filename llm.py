@@ -137,7 +137,7 @@ llm = LLM("o1-mini")
 
 #eval_llm = LLM("gpt-4-1106-preview")
 #eval_llm = LLM("gpt-4o", override_hparams={'temperature': 0.1})
-eval_llm = LLM("ollama_qwen2.5-coder:7b-instruct-q8_0", override_hparams={'temperature': 0.7})
+eval_llm = LLM("ollama_qwen2.5-coder:7b-instruct-q8_0", override_hparams={'temperature': 0.7, "top_k": 20, "repeat_penalty": 1.0, "top_p": 0.8})
 #eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
 
 vision_eval_llm = LLM("ollama_llava:7b", override_hparams={'temperature': 0.1})
