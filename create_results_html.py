@@ -312,7 +312,9 @@ function hiderows() {
             value = f"{correct}/{total}"
             int_value = correct/total
             # Color coding the cell or leaving it blank if the value is None
-            link = sanitize_filename(column_key + "_" + row_key + ".html")
+            # Sanitize the filename for the individual test result HTML
+            result_file = sanitize_filename(column_key + "_" + row_key)
+            link = result_file + ".html"
             cell_html = f"<td style='background-color: rgb{convert_to_color_through_yellow(int_value)};'><a href='{link}#tab1'>{str(value)}</a></td>" if value is not None else "<td></td>"
             html_content += cell_html
         html_content += "</tr>"
@@ -512,7 +514,8 @@ function hiderows() {
                 
                 example_html += one_tab.format((idx+1),final_output)
             
-            open("evaluation_examples/"+column_key+"_"+row_key+".html", "w").write(css+example_html)
+            result_file = sanitize_filename(column_key + "_" + row_key)
+            open(f"evaluation_examples/{result_file}.html", "w").write(css+example_html)
 
 def convert_to_color_through_yellow(value):
     value *= 255
