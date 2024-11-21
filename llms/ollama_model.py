@@ -9,7 +9,8 @@ class OllamaModel:
         with open("config.json") as f:
             config = json.load(f)
         self.name = name
-        self.hparams = config['hparams']
+        self.system = config['system_prompt']
+        self.hparams = os.getenv('OLLAMA_SYSTEM_PROMPT') or config['hparams']
         self.hparams.update(config['llms'].get('ollama', {}).get('hparams', {}))
         # Get API base from config or environment variable, fallback to default
         self.api_base = config['llms'].get('ollama', {}).get('api_base') or \
@@ -17,7 +18,7 @@ class OllamaModel:
                        "http://localhost:11434"  # Default Ollama API endpoint
 
     def make_request(self, conversation, add_image=None, max_tokens=None, json_format=False):
-        messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": content} for i, content in enumerate(conversation)]
+        messages = [{"role": "system", "content": self.system}] + [{"role": "user" if i % 2 == 0 else "assistant", "content": content} for i, content in enumerate(conversation)]
 
         if add_image:
             buffered = BytesIO()

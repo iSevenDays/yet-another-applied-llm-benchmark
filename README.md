@@ -273,6 +273,9 @@ If you'd like to test a new LLM, you'll just need to add a new file to llms/[mod
 which implements an inference function. From there, modify [llm.py](llm.py) to include the
 appropriate model.
 
+## Chaning of the System Prompt for Ollama
+Set OLLAMA_SYSTEM_PROMPT or config.json "system_prompt" variable.
+
 ## Adding new test cases
 
 As discussed above, I've built a small dataflow DSL to implement test cases.

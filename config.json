@@ -1,5 +1,6 @@
 {
     "container": "docker",
+    "system_prompt": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
     "hparams": {
         "temperature": 0.7,
         "repeat_penalty": 1.0,
