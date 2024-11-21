@@ -33,6 +33,12 @@ from pygments.formatters import HtmlFormatter
 
 from evaluator import *
 
+import re
+
+def sanitize_filename(filename):
+    # Replace invalid characters with underscores
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
 def fix(x):
     if type(x) != str:
         x = str(x)
@@ -276,7 +282,8 @@ function hiderows() {
 
         test_case = "<style>" + HtmlFormatter().get_style_defs('.highlight') + "</style>" + highlight(test_case, PythonLexer(), HtmlFormatter(linenos=True, style='colorful'))
         
-        open("evaluation_examples/"+column_key.split(".py")[0]+".html", "w").write(test_case)
+        filename = sanitize_filename(column_key + "_" + row_key + ".html")
+        open("evaluation_examples/" + filename, "w").write(css + example_html)
 
         
         format_column_key = f'<a href="{column_key.split(".py")[0]+".html"}">{column_key.split(".Test")[1]}</a>'
@@ -298,7 +305,7 @@ function hiderows() {
             value = f"{correct}/{total}"
             int_value = correct/total
             # Color coding the cell or leaving it blank if the value is None
-            link = column_key+"_"+row_key+".html"
+            link = sanitize_filename(column_key + "_" + row_key + ".html")
             cell_html = f"<td style='background-color: rgb{convert_to_color_through_yellow(int_value)};'><a href='{link}#tab1'>{str(value)}</a></td>" if value is not None else "<td></td>"
             html_content += cell_html
         html_content += "</tr>"
