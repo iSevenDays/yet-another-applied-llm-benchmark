@@ -36,8 +36,14 @@ from evaluator import *
 import re
 
 def sanitize_filename(filename):
+    # Split on colon if it exists to preserve the #tab1 anchor
+    name, *rest = filename.split('#', 1)
     # Replace invalid characters with underscores
-    return re.sub(r'[<>:"/\\|?*]', '_', filename)
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name)
+    # Add back the anchor if it existed
+    if rest:
+        sanitized = sanitized + '#' + rest[0]
+    return sanitized
 
 def fix(x):
     if type(x) != str:
