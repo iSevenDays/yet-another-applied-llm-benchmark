@@ -274,12 +274,11 @@ function hiderows() {
 
         test_case = open("tests/"+column_key.split(".py")[0]+".py", "r").read()
 
-        test_case_html = "<style>" + HtmlFormatter().get_style_defs('.highlight') + "</style>" + highlight(test_case, PythonLexer(), HtmlFormatter(linenos=True, style='colorful'))
+        test_case = "<style>" + HtmlFormatter().get_style_defs('.highlight') + "</style>" + highlight(test_case, PythonLexer(), HtmlFormatter(linenos=True, style='colorful'))
         
-        test_case_path = os.path.join("evaluation_examples", column_key.split(".py")[0]+".html")
-        with open(test_case_path, "w") as f:
-            f.write(test_case_html)
+        open("evaluation_examples/"+column_key.split(".py")[0]+".html", "w").write(test_case)
 
+        
         format_column_key = f'<a href="{column_key.split(".py")[0]+".html"}">{column_key.split(".Test")[1]}</a>'
         format_column_key = f"""
         <span class="footnote" id="footnote{idx}">
