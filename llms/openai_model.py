@@ -16,6 +16,9 @@ class OpenAIModel:
         if 'repeat_penalty' in self.hparams:
             del self.hparams['repeat_penalty']
             print("Removed 'repeat_penalty' from hparams, reason: unsupported")
+        if 'top_k' in self.hparams:
+            del self.hparams['top_k']
+            print("Removed 'top_k' from hparams, reason: unsupported")
 
     def make_request(self, conversation, add_image=None, max_tokens=None, json=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]
