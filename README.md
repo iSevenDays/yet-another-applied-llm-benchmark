@@ -249,6 +249,10 @@ python main.py --run-tests --test print_hello --model gpt-3.5-turbo-0125
 Running the benchmark with Ollama. Prefix models with `ollama_`.
 ```bash
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model ollama_llama3.1:latest
+
+Running the benchmark with OpenAI-like endpoint. Prefix models with `openai_`.
+```bash
+OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model openai_llama3.1:latest
 ```
 Ollama base URL can be specified in config.json
 

@@ -33,7 +33,10 @@ from llms.ollama_model import OllamaModel
 class LLM:
     def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams={}):
         self.name = name
-        if 'gpt' in name or name.startswith('o1'):
+        if 'openai_' in name:
+            model = name.replace('openai_', '')
+            self.model = OpenAIModel(name)
+        elif 'gpt' in name or name.startswith('o1'):
             self.model = OpenAIModel(name)
         # elif 'llama' in name:
         #     self.model = LLAMAModel(name)
