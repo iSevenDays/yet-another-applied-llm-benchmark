@@ -12,7 +12,8 @@
             "project_id": "TODO"
         },
         "openai": {
-            "api_key": "sk-12345"
+            "api_key": "sk-12345",
+            "api_base": "http://192.168.0.155:8080"
         },
         "mistral": {
             "api_key": "TODO"

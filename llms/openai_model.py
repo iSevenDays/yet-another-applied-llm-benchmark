@@ -9,7 +9,8 @@ class OpenAIModel:
     def __init__(self, name):
         config = json.load(open("config.json"))
         api_key = config['llms']['openai']['api_key'].strip()
-        self.client = OpenAI(api_key=api_key)
+        api_base = config['llms']['openai']['api_base']
+        self.client = OpenAI(api_key=api_key, base_url=api_base)
         self.name = name
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['openai'].get('hparams') or {})
