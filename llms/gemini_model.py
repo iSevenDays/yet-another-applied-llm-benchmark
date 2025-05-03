@@ -11,7 +11,7 @@ class GeminiModel:
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['openai'].get('hparams') or {})
         
-    def make_request(self, conversation, max_tokens=None, add_image=None):
+    def make_request(self, conversation, max_tokens=None, add_image=None, json=False, stream=False):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.name}:generateContent?key={self.api_key}"
 
         contents = []

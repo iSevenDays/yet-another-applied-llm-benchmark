@@ -14,7 +14,7 @@ class CohereModel:
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['cohere'].get('hparams') or {})
 
-    def make_request(self, conversation, add_image=None, max_tokens=None):
+    def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         prior_messages = [{"role": "USER" if i%2 == 0 else "CHATBOT", "message": content} for i,content in enumerate(conversation[:-1])]
 
         kwargs = {

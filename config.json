@@ -2,10 +2,8 @@
     "container": "docker",
     "system_prompt": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
     "hparams": {
-        "temperature": 0.7,
         "repeat_penalty": 1.0,
-        "top_k": 20,
-        "top_p": 0.8
+        "top_k": 20
     },
     "llms": {
         "vertexai": {
@@ -13,7 +11,7 @@
         },
         "openai": {
             "api_key": "sk-12345",
-            "api_base": "http://192.168.0.155:8080"
+            "api_base": "http://192.168.0.20:8080/v1"
         },
         "mistral": {
             "api_key": "TODO"

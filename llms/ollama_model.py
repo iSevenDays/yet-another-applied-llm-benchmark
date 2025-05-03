@@ -17,7 +17,7 @@ class OllamaModel:
                        os.getenv('OLLAMA_API_BASE') or \
                        "http://localhost:11434"  # Default Ollama API endpoint
 
-    def make_request(self, conversation, add_image=None, max_tokens=None, json_format=False):
+    def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         messages = [{"role": "system", "content": self.system}] + [{"role": "user" if i % 2 == 0 else "assistant", "content": content} for i, content in enumerate(conversation)]
 
         if add_image:
@@ -26,21 +26,21 @@ class OllamaModel:
             img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
             messages[0]['images'] = [img_str]
 
-        data = {
+        payload = {
             "model": self.name,
             "messages": messages,
-            "stream": False
+            "stream": stream
         }
 
-        if max_tokens:
-            data["options"] = {"num_predict": max_tokens}
+        if json:
+            payload["format"] = "json"
 
-        if json_format:
-            data["format"] = "json"
+        if max_tokens is not None:
+            payload["options"] = {"num_predict": max_tokens}
 
-        data.update(self.hparams)
+        payload.update(self.hparams)
 
-        response = requests.post(f"{self.api_base}/api/chat", json=data)
+        response = requests.post(f"{self.api_base}/api/chat", json=payload, stream=stream)
         response.raise_for_status()
         result = response.json()
 

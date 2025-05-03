@@ -5,7 +5,7 @@ class LLAMAModel:
     def __init__(self, path):
         self.llm = Llama(model_path=path, chat_format="llama-2", n_ctx=1524)
 
-    def make_request(self, conversation, add_image=None, logit_bias=None, max_tokens=None, skip_cache=False):
+    def make_request(self, conversation, add_image=None, logit_bias=None, max_tokens=None, json=False, stream=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]
         print("Start chat")
         out = self.llm.create_chat_completion(

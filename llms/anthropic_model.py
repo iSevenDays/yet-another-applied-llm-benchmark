@@ -11,7 +11,7 @@ class AnthropicModel:
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['anthropic'].get('hparams') or {})
         
-    def make_request(self, conversation, add_image=None, logit_bias=None, max_tokens=None):
+    def make_request(self, conversation, add_image=None, logit_bias=None, max_tokens=None, json=False, stream=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]
         response = anthropic.Anthropic(api_key=self.api_key).messages.create(
             model=self.name,

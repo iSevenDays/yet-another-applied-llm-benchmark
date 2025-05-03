@@ -1,6 +1,7 @@
 from io import BytesIO
 from PIL import Image
 import base64
+import os  # Import the os module
 
 from openai import OpenAI
 import json
@@ -9,19 +10,16 @@ class OpenAIModel:
     def __init__(self, name):
         config = json.load(open("config.json"))
         api_key = config['llms']['openai']['api_key'].strip()
-        api_base = config['llms']['openai']['api_base']
+        
+        # Prioritize environment variable, fallback to config.json
+        api_base = os.getenv('OPENAI_BASE_URL') or config['llms']['openai']['api_base']
+        
         self.client = OpenAI(api_key=api_key, base_url=api_base)
         self.name = name
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['openai'].get('hparams') or {})
-        if 'repeat_penalty' in self.hparams:
-            del self.hparams['repeat_penalty']
-            print("Removed 'repeat_penalty' from hparams, reason: unsupported")
-        if 'top_k' in self.hparams:
-            del self.hparams['top_k']
-            print("Removed 'top_k' from hparams, reason: unsupported")
 
-    def make_request(self, conversation, add_image=None, max_tokens=None, json=False):
+    def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]
     
         if add_image:
@@ -52,12 +50,23 @@ class OpenAIModel:
         if self.name.startswith("o1"):
             del kwargs['temperature']
 
-        out = self.client.chat.completions.create(
+        # Log non-message kwargs for debugging, exclude potentially large messages
+        debug_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
+        print(f"DEBUG: OpenAI request to {self.client.base_url} model={self.name}, stream={stream}, kwargs={debug_kwargs}")
+
+        # Pass stream=True to the API call
+        stream_response = self.client.chat.completions.create(
             model=self.name,
+            stream=stream, # Pass the stream flag
             **kwargs
         )
-    
-        return out.choices[0].message.content
+
+        # Return the stream object if stream=True, otherwise process and return string
+        if stream:
+            return stream_response
+        else:
+            # Fallback for non-streaming (likely won't be used with new llm.py logic)
+            return stream_response.choices[0].message.content
 
 if __name__ == "__main__":
     import sys

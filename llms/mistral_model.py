@@ -18,7 +18,7 @@ class MistralModel:
         }
         self.endpoint = "https://api.mistral.ai/v1/chat/completions"
 
-    def make_request(self, conversation, add_image=None, max_tokens=None):
+    def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         # Prepare the conversation messages in the required format
         formatted_conversation = [
             {"role": "user" if i % 2 == 0 else "assistant", "content": content}

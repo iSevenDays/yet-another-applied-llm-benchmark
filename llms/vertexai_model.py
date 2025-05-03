@@ -22,7 +22,7 @@ class VertexAIModel:
             self.chat_model = ChatModel.from_pretrained(name)
 
 
-    def make_request(self, conversation, add_image=None, max_tokens=2048, stream=False):
+    def make_request(self, conversation, add_image=None, max_tokens=2048, json=False, stream=False):
         if 'gemini' in self.name:
             conversation = [" " if c == "" else c for c in conversation]
             conf = {

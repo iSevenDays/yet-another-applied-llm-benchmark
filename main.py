@@ -25,6 +25,8 @@ import pickle
 import subprocess
 from tqdm import tqdm
 import create_results_html
+import traceback
+import logging
 
 from evaluator import Env, Conversation, run_test
 
@@ -59,12 +61,12 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
         return False, f"An error occurred: {str(e)}"
                     
 
-def run_all_tests(test_llm, use_cache=True, which_tests=None):
+def run_all_tests(test_llm_name, use_cache=True, which_tests=None):
     """
     Run every test case in the benchmark, returning a dictionary of the results
     of the format { "test_name": (success, output) }
     """
-    test_llm = llm.LLM(test_llm, use_cache=use_cache)
+    test_llm = llm.LLM(test_llm_name, use_cache=use_cache)
     print(f'test_llm: {test_llm.name}')
     print(f'llm.eval_llm: {llm.eval_llm.name}')
     sr = {}
@@ -75,38 +77,91 @@ def run_all_tests(test_llm, use_cache=True, which_tests=None):
         test_files = [f for f in test_files if f[:-3] in which_tests]
     
     # Create a tqdm progress bar
-    with tqdm(total=len(test_files), desc="Running tests", unit="test") as pbar:
-        for f in test_files:
+    with tqdm(total=len(test_files), desc="Files", unit="file", ascii=" >==") as pbar:
+        for filename in test_files:
+            module = None # Ensure module is reset for each file
+            module_name = filename[:-3]
+            file_path = os.path.join("tests", filename)
+            test_names_in_file = []
+
             try:
-                spec = importlib.util.spec_from_file_location(f[:-3], "tests/" + f)
+                # Load module and find tests for the current file (keep existing try/except logic here)
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                if not spec or not spec.loader:
+                    pbar.write(f"Warning: Could not create spec for {filename}. Skipping.")
+                    pbar.update(1) # Ensure bar advances if file skipped
+                    continue
+
                 module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module # Handle relative imports
                 spec.loader.exec_module(module)
-            except Exception as exc:
-                print(f"SKIPPING TEST {f}, reason: {exc}")
-                pbar.update(1)
-                continue
-            
-            test_case = [x for x in dir(module) if x.startswith("Test") and x != "TestCase"]
-            if len(test_case) == 0:
-                pbar.update(1)
-                continue
-            
-            pbar.set_postfix_str(f"Current: {f}")
-            for t in test_case:
-                tmp = sys.stdout
-                sys.stdout = open(os.devnull, 'w')
+                test_names_in_file = [name for name in dir(module) if name.startswith("Test") and hasattr(getattr(module, name), '__call__')]
 
-                test = getattr(module, t)
-                ok, reason = run_one_test(test, test_llm, llm.eval_llm, llm.vision_eval_llm)
+            except Exception as import_exc:
+                pbar.write(f"\nWarning: Skipping file {filename} due to import error:")
+                for line in traceback.format_exception(import_exc):
+                    pbar.write(line.strip())
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+                pbar.update(1) # Ensure bar advances if file is skipped
+                continue
 
-                sys.stdout = tmp
-                if ok:
-                    pbar.write(f"Test Passes: {t}")
-                else:
-                    pbar.write(f"Test Fails: {t} from {f}, reason: {reason}")
-                sr[f+"."+t] = (ok, reason)
-            
-            pbar.update(1)
+            if not test_names_in_file:
+                pbar.write(f"Info: No tests found in {filename}.")
+                pbar.update(1) # Ensure bar advances if file has no tests
+                continue
+
+            # --- Start: Modified Inner Loop --- (Replaces the original inner loop)
+            num_tests_in_file = len(test_names_in_file)
+            initial_file_progress = pbar.n # Track current progress bar position
+
+            for i, test_name in enumerate(test_names_in_file): # Loop per test
+                pbar.set_description_str(f"Test: {filename} -> {test_name}") # Update description
+                pbar.refresh() # Ensure description updates immediately
+
+                original_stdout = sys.stdout
+                devnull = open(os.devnull, 'w') # Use os.devnull
+                test_passed = False
+                failure_reason = "Test execution did not yield result"
+                try:
+                    sys.stdout = devnull # Redirect stdout
+                    test_instance = getattr(module, test_name)
+                    test_passed, failure_reason = run_one_test(
+                        test_instance,
+                        test_llm,
+                        llm.eval_llm,
+                        llm.vision_eval_llm
+                    )
+                except Exception as run_exc:
+                    test_passed = False
+                    failure_reason = f"Unhandled exception in test run: {run_exc}"
+                    pbar.write("\n--- Unhandled Exception Traceback ---")
+                    traceback.print_exc(file=sys.stderr)
+                    pbar.write("--- End Traceback ---")
+                finally:
+                    sys.stdout = original_stdout
+                    devnull.close()
+
+                result_str = "PASS" if test_passed else "FAIL"
+                pbar.write(f"{result_str}: {test_name}")
+                if not test_passed:
+                    reason_str = repr(failure_reason)
+                    if len(reason_str) > 300: reason_str = reason_str[:297] + "..."
+                    pbar.write(f"  Reason: {reason_str}")
+
+                sr[f"{filename}.{test_name}"] = (test_passed, failure_reason) # Use 'sr'
+
+                # --- MINIMAL PROGRESS UPDATE --- 
+                progress_increment = (1.0 / num_tests_in_file)
+                current_progress = min(initial_file_progress + (i + 1) * progress_increment, initial_file_progress + 1)
+                pbar.n = max(current_progress, pbar.n)
+                pbar.refresh()
+
+            # --- End: Modified Inner Loop ---
+
+            # Ensure the progress bar cleanly reaches the next integer after file completion
+            pbar.n = initial_file_progress + 1
+            pbar.refresh()
     
     return sr
 
@@ -171,6 +226,21 @@ def load_saved_runs(output_dir, model):
     return saved_runs
 
 def main():
+    # --- Minimal Logging Configuration --- 
+    log_filename = 'debug_stream.log'
+    logging.basicConfig(
+        level=logging.DEBUG, # Log DEBUG level and above
+        format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s', # Added funcName
+        handlers=[
+            logging.FileHandler(log_filename, mode='w'), # Write to file, overwrite each run
+            logging.StreamHandler(sys.stdout) # Log INFO+ to console (stdout)
+        ]
+    )
+    # Set console handler level (optional)
+    logging.getLogger().handlers[1].setLevel(logging.INFO)
+    logging.info(f"Logging initialized. DEBUG logs going to {log_filename}")
+    # --- End Logging Configuration ---
+
     parser = argparse.ArgumentParser(description="Run tests on language models.")
     parser.add_argument('--model', help='Specify a specific model to run.', type=str, action="append")
     parser.add_argument('--all-models', help='Run all models.', action='store_true')
@@ -206,7 +276,6 @@ def main():
     for model in models_to_run:
         if args.load_saved:
             data[model] = {}
-
             commit_hashes = get_ordered_logs(args.logdir)
             print("Loading data from commits")
 
@@ -216,7 +285,6 @@ def main():
                 for k,v in kvs.items():
                     data[model][k] = v
         elif args.run_tests:
-
             tests_subset = None # run all of them
             
             if args.test:

@@ -20,6 +20,8 @@ import requests
 import json
 import pickle
 import time
+import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from llms.openai_model import OpenAIModel
 from llms.anthropic_model import AnthropicModel
@@ -33,9 +35,10 @@ from llms.ollama_model import OllamaModel
 class LLM:
     def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams={}):
         self.name = name
+        print(f"DEBUG: Initializing LLM with name: {name}")
         if 'openai_' in name:
             model = name.replace('openai_', '')
-            self.model = OpenAIModel(name)
+            self.model = OpenAIModel(model)
         elif 'gpt' in name or name.startswith('o1'):
             self.model = OpenAIModel(name)
         # elif 'llama' in name:
@@ -58,8 +61,20 @@ class LLM:
         elif 'llama3' in name or 'mixtral' in name or 'gemma' in name:
             self.model = GroqModel(name)
         else:
-            raise
+            raise RuntimeError(f"Unknown model type for name: {name}")
         self.model.hparams.update(override_hparams)
+
+        # Clean up unsupported hparams *after* overrides are applied
+        if isinstance(self.model, OpenAIModel):
+            if 'repeat_penalty' in self.model.hparams:
+                del self.model.hparams['repeat_penalty']
+                print("Removed 'repeat_penalty' from hparams, reason: unsupported by OpenAIModel")
+            if 'top_k' in self.model.hparams:
+                del self.model.hparams['top_k']
+                print("Removed 'top_k' from hparams, reason: unsupported by OpenAIModel")
+
+        # Update name based on actual model name if prefix was used
+        self.name = self.model.name
 
         self.use_cache = use_cache
         if use_cache:
@@ -72,6 +87,16 @@ class LLM:
         else:
             self.cache = {}
 
+    def _log_stream_progress(self, chunk_count, start_time, log_accumulator, final_log=False):
+        """Helper method to log stream progress."""
+        current_time = time.monotonic()
+        elapsed_time = int(current_time - start_time)
+        if final_log:
+            if log_accumulator:
+                 logging.debug(f"Stream final content received ({elapsed_time}s):\n--- Accumulated Start ---\n{log_accumulator}\n--- Accumulated End ---")
+        else:
+             logging.debug(f"Stream content received (Chunks ~{chunk_count}, {elapsed_time}s):\n--- Accumulated Start ---\n{log_accumulator}\n--- Accumulated End ---")
+
     def __call__(self, conversation, add_image=None, max_tokens=None, skip_cache=False, json=False):
         if type(conversation) == str:
             conversation = [conversation]
@@ -79,68 +104,104 @@ class LLM:
         cache_key = tuple(conversation) if add_image is None else tuple(conversation + [add_image.tobytes()])
 
         if cache_key in self.cache and not skip_cache and self.use_cache:
-            
-            print(self.name, "GETCACHE", repr(self.cache[cache_key]))
+            logging.info(f"{self.name} GETCACHE")
             if len(self.cache[cache_key]) > 0:
                 return self.cache[cache_key]
             else:
-                print("Empty cache hit")
+                logging.info("Empty cache hit")
 
-        print(self.name, "CACHE MISS", repr(conversation))
-
-        
-        import traceback
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        log_prompt_snippet = repr(conversation[0])[:200] + ("..." if len(conversation[0]) > 200 else "")
+        logging.info(f"{self.name} CACHE MISS. Prompt starts: {log_prompt_snippet}")
 
         response = "Model API request failed"
-        for _ in range(3):
-            try:
-                extra = {}
-                if json:
-                    extra['json'] = json
-                
-                def request_with_timeout():
-                    return self.model.make_request(conversation, add_image=add_image, max_tokens=max_tokens, **extra)
-                
-                with ThreadPoolExecutor() as executor:
-                    future = executor.submit(request_with_timeout)
-                    try:
-                        response = future.result(timeout=60*10)  # 10 minutes
-                        break  # If successful, break out of the retry loop
-                    except TimeoutError:
-                        print("Request timed out after 60 seconds")
-                        response = "Model API request failed due to timeout"
-                        # Continue to the next retry
-            except Exception as e:
-                print("RUN FAILED", e)
-                traceback.print_exc()
-            
-            time.sleep(10)
-        
 
-        if self.use_cache and response != "Model API request failed":
+        def process_request_and_stream(json_arg, overall_timeout=300):
+            stream = None
+            full_response_content = ""
+            log_accumulator = "" # Accumulator for logging
+            log_chunk_interval = 500 # Log every N chunks
+            chunk_count = 0
+            start_time = time.monotonic()
+            try:
+                stream = self.model.make_request(
+                    conversation,
+                    add_image=add_image,
+                    max_tokens=max_tokens,
+                    json=json_arg,
+                    stream=True
+                )
+                logging.debug(f"Stream opened for {self.name}. Timeout: {overall_timeout}s.")
+
+                for chunk in stream:
+                    current_time = time.monotonic()
+                    if current_time - start_time > overall_timeout:
+                        logging.warning(f"Stream processing exceeded overall timeout ({overall_timeout}s) for {self.name}.")
+                        raise TimeoutError("Stream processing exceeded overall timeout.")
+
+                    content_part = ""
+                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                        content_part = chunk.choices[0].delta.content
+                        full_response_content += content_part
+                        log_accumulator += content_part # Add to accumulator
+                        chunk_count += 1
+
+                        # Log the accumulated content periodically
+                        if chunk_count % log_chunk_interval == 0:
+                            self._log_stream_progress(chunk_count, start_time, log_accumulator)
+                            log_accumulator = "" # Reset accumulator
+
+                # Log any remaining accumulated content after the loop
+                self._log_stream_progress(chunk_count, start_time, log_accumulator, final_log=True)
+
+                logging.debug(f"Stream finished for {self.name} after {int(time.monotonic() - start_time)}s. Chunks: {chunk_count}, Length: {len(full_response_content)}")
+                return full_response_content
+
+            except TimeoutError:
+                raise
+            except Exception as e:
+                logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
+                raise
+
+        for i in range(3):
+            logging.debug(f"Attempt {i+1}/3 for model {self.name}")
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=1800)
+                    response = future.result()
+                    break
+
+            except TimeoutError: 
+                logging.warning(f"Caught timeout on attempt {i+1} for model {self.name}")
+                response = "Model API request failed due to timeout"
+            except Exception as e:
+                logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False) 
+                response = f"Model API request failed: {type(e).__name__}" 
+            
+            logging.info(f"Request failed on attempt {i+1}. Retrying in 10 seconds...")
+            time.sleep(10)
+
+        if self.use_cache and "Model API request failed" not in response:
             self.cache[cache_key] = response
-            pickle.dump(self.cache, open(f"tmp/cache-{self.name.split('/')[-1]}.p","wb"))
-        
+            try:
+                os.makedirs("tmp", exist_ok=True)
+                cache_file = f"tmp/cache-{self.name.split('/')[-1]}.p"
+                with open(cache_file, "wb") as f:
+                    pickle.dump(self.cache, f)
+                logging.debug(f"Saved response to cache: {cache_file}")
+            except Exception as pickle_e:
+                 logging.error(f"Failed to save cache for {self.name}: {pickle_e}")
+
         return response
 
 #llm = LLM("command")
 #llm = """LLM("gpt-3.5-turbo")"""
 
-llm = LLM("ollama_ollama_deepseek-coder-v2")
+# llm = LLM("ollama_ollama_deepseek-coder-v2")
 #llm = LLM("gpt-4-turbo-2024-04-09")
 #llm = LLM("gemini-1.5-pro-preview-0409")
 llm = LLM("o1-mini")
 
-#llm = LLM("claude-3-opus-20240229")
-#llm = LLM("claude-3-5-sonnet-20240620")
-
-#llm = LLM("mistral-tiny")
-#llm = LLM("gemini-pro", override_hparams={'temperature': 0.3}, use_cache=False)
-
-#eval_llm = LLM("gpt-4-1106-preview")
-#eval_llm = LLM("gpt-4o", override_hparams={'temperature': 0.1})
-eval_llm = LLM("ollama_qwen2.5-coder:7b-instruct-q8_0", override_hparams={'temperature': 0.7, "top_k": 20, "repeat_penalty": 1.0, "top_p": 0.8})
+eval_llm = LLM("openai_qwen3-32b")
 #eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
 
-vision_eval_llm = LLM("ollama_llava:7b", override_hparams={'temperature': 0.1})
+vision_eval_llm = LLM("openai_gpt-4-vision", override_hparams={'temperature': 0.1})
