@@ -162,8 +162,9 @@ class LLM:
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
                 raise
 
-        for i in range(3):
-            logging.debug(f"Attempt {i+1}/3 for model {self.name}")
+        backoff_times = [10, 20, 30, 60, 90, 120, 300]  # New backoff times
+        for i in range(len(backoff_times)):
+            logging.debug(f"Attempt {i+1}/{len(backoff_times)} for model {self.name}")
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=1800)
@@ -177,8 +178,10 @@ class LLM:
                 logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False) 
                 response = f"Model API request failed: {type(e).__name__}" 
             
-            logging.info(f"Request failed on attempt {i+1}. Retrying in 10 seconds...")
-            time.sleep(10)
+            if i < len(backoff_times):
+                wait_time = backoff_times[i]
+                logging.info(f"Request failed on attempt {i+1}. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
 
         if self.use_cache and "Model API request failed" not in response:
             self.cache[cache_key] = response
