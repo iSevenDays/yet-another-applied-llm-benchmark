@@ -451,6 +451,7 @@ class ExtractCode(Node):
             output = self.llm(self.manual.replace("<A>", orig_output))
         elif self.keep_main:
             assert self.postfix == ""
+            # Use eval_llm, because it is smarter and will not hallucinate code
             output = self.eval_llm(f"Take the below answer to my programming question {language} and return just the complete code in a single file so I can copy and paste it into an editor and directly run it. Include any header and main necessary so I can run it by copying this one file. DO NOT MODIFY THE CODE OR WRITE NEW CODE. Here is the code: \n" + orig_output)
         else:
             output = self.eval_llm(f"Take the below answer to my programming question {language} and return just the complete code in a single file so I can copy and paste it into an editor and directly run it. Remove any test cases or example code after the function definition. Remove any main function. I will write those myself. Do include header imports. DO NOT MODIFY THE CODE OR WRITE NEW CODE. Here is the code: \n" + orig_output + ("\nI will be running this code with the following helper functions:\n" + self.postfix if self.postfix else ""))
@@ -668,73 +669,26 @@ class SendStdoutReceiveStdin(Node):
             
 class LLMRun(Node):
     """
-    A node that runs the LLM on the input string.
+    A node to invoke a language model on any given text.
+
+    This is the core function that allows us to evaluate the capabilities of any model.
     By default, it strips the <think>...</think> tags from the output.
     """
-    def __init__(self, runner=None, json=False, strip_think: bool = True):
-        """
-        Initializes the LLMRun node.
-
-        Args:
-            runner: Optional runner identifier (e.g., "eval").
-            json: Whether to request JSON output from the LLM.
-            strip_think: If True (default), removes <think>...</think> blocks
-                         from the LLM output before passing it on.
-        """
-        super().__init__(runner)
+    def __init__(self, check_prompt="<A>", llm=LLM, json=False, strip_think: bool = True):
+        self.check_prompt = check_prompt
+        self.which_llm = llm
         self.json = json
         self.strip_think = strip_think
 
-    def setup(self, env, conv, llm, eval_llm, vision_eval_llm):
-        """
-        Sets up the node with necessary context.
-        """
-        super().setup(env, conv, llm, eval_llm, vision_eval_llm)
-        
-    def __call__(self, prompt):
-        """
-        Executes the LLM call.
-
-        Args:
-            prompt: The input prompt string.
-
-        Yields:
-            A tuple containing:
-            - The processed output string (potentially with <think> tags removed).
-            - A Reason object detailing the input and the *original* LLM output.
-        """
-        self.input = prompt
-        
-        # Determine which LLM instance to use
-        llm_to_use = self.eval_llm if self.runner == "eval" else self.llm
-        
-        # Perform the LLM call
-        try:
-            raw_output = llm_to_use(prompt, json=self.json)
-        except Exception as e:
-            # Handle potential errors during the LLM call itself
-            print(f"Error during LLM call: {e}")
-            # Decide how to proceed, e.g., yield an error indicator or raise
-            # For now, yield an empty string and log the error in Reason
-            yield "", Reason(type(self), (self.input, f"LLM call failed: {e}"))
-            return
-
-        processed_output = raw_output
-
-        # Strip think tags if requested and they seem present
-        if self.strip_think and '</think>' in raw_output:
-            try:
-                # Take content after the last closing think tag
-                processed_output = raw_output.split('</think>')[-1]
-                # Remove leading whitespace/newlines
-                processed_output = processed_output.lstrip()
-            except Exception as e:
-                # Log error if splitting fails, but proceed with raw output
-                print(f"Warning: Failed to strip <think> tags: {e}. Using raw output for downstream nodes.")
-                processed_output = raw_output
-                
-        # Yield the processed output for the next node, but log the raw output in Reason
-        yield processed_output, Reason(type(self), (self.input, raw_output)) 
+    def __call__(self, output):
+        llm = getattr(self, self.which_llm)
+        to_send = self.check_prompt.replace("<A>", output)
+        out = llm(to_send, json=self.json)
+        if self.strip_think:
+            out = re.sub(r'<think>(.*?)</think>', r'\1', out)
+        else:
+            out = out
+        yield out, Reason(type(self), (to_send, out))
 
 class LLMConversation(Node):
     """
