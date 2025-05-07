@@ -27,6 +27,7 @@ from tqdm import tqdm
 import create_results_html
 import traceback
 import logging
+import docker # Added for exception handling
 
 from evaluator import Env, Conversation, run_test
 
@@ -54,10 +55,20 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
         if env.container:
             docker_controller.async_kill_container(env.docker, env.container)
         return False, "Test was interrupted"
+    except docker.errors.DockerException as docker_err: # Catch Docker-specific errors
+        # Check if it's likely a connection error
+        err_str = str(docker_err).lower()
+        user_message = f"Docker error: {docker_err}"
+        if "connection aborted" in err_str or "file not found" in err_str or "connection refused" in err_str or "docker daemon" in err_str:
+             user_message = "Failed to connect to Docker/Podman. Please ensure the daemon/service is running and accessible."
+        if env.container:
+            docker_controller.async_kill_container(env.docker, env.container)
+        return False, user_message
     except Exception as e:
         # Handle any other exceptions that might occur
         if env.container:
             docker_controller.async_kill_container(env.docker, env.container)
+        # Keep original formatting for other errors
         return False, f"An error occurred: {str(e)}"
                     
 
