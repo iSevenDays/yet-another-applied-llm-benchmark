@@ -757,7 +757,9 @@ class SeleniumDraw(Node):
         #try:
             pass
     
-        except:
+        except Exception as e: # Catch specific exceptions, not GeneratorExit
+            # Optionally log the error 'e' here
+            print(f"Error during SeleniumDraw execution: {e}") # Added print for debugging
             yield b"", Reason(type(self), b"")
         
 
