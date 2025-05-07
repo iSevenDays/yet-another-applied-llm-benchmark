@@ -5,6 +5,7 @@ on tasks I care about. I know I care about them because each test is directly
 derived from something I've asked a LLM to perform for me in the last year.
 
 For example, there are tests in this benchmark that evaluate the ability of a model to:
+
 - convert a python function to an equivalent-but-faster c function;
 - decompile python bytecode to functional source code;
 - explain the functionality of minified javascript;
@@ -45,21 +46,20 @@ This DSL makes it easy for me to evaluate significantly more diverse and
 more sophisticated behavior than any other evaluation benchmark I'm aware of.
 This is helpful for determining whether or not models are capable of performing tasks I actually care about.
 
-
 ## Results
 
 I've evaluated a few models on this benchmark. Here's how they perform:
-* o1-mini: 62% passed
-* Claude 3.5 Sonnet: 56% passed
-* GPT 4o: 48% passed
-* Gemini 1.5 Pro: 43% passed
-* Claude 3 Opus: 42% passed
-* GPT 4o Mini: 36% passed
-* Mistral Large: 28% passed
-* GPT 3.5: 26% passed
+
+- o1-mini: 62% passed
+- Claude 3.5 Sonnet: 56% passed
+- GPT 4o: 48% passed
+- Gemini 1.5 Pro: 43% passed
+- Claude 3 Opus: 42% passed
+- GPT 4o Mini: 36% passed
+- Mistral Large: 28% passed
+- GPT 3.5: 26% passed
 
 A complete evaluation grid is available [here](https://nicholas.carlini.com/writing/2024/evaluation_examples/index.html).
-
 
 ## What this is not
 
@@ -98,7 +98,6 @@ without having some skill at the language. But you might luck your
 way into failing by naming the function something I didn't expect and so your
 correct code just is never invoked.
 
-
 ## What this is
 
 Again, it's just a collection of questions I've actually asked language models to solve for me
@@ -112,7 +111,6 @@ Other questions are "unfair" because they require recent knowledge
 (e.g., "what is the hidden dimension of llama-2 70b?").
 But I care if a model can answer these correctly for me.
 
-
 # Installing
 
 Getting this benchmark up and running is fairly straightforward.
@@ -125,7 +123,6 @@ On the python side you'll just need to run
 If you want to run it and evaluate a wide range of models you'll also need
 `pip install -r requirements-extra.txt` to install the other models.
 
-
 ## Podman (preferred)
 
 I want to run things in a container to keep them basically safe.
@@ -136,12 +133,10 @@ user almost-root permissions to start new docker jobs. This scares me a bit.
 So I prefer to use podman. Install it however you're supposed to for your
 system.
 
-
 ## Docker (optional)
 
 Again this is fairly system dependent so you'll have to go somewhere else to find
 out how to install it for your system.
-
 
 ## Why do I need docker/podman?
 
@@ -165,7 +160,6 @@ a flag in the code
 `I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKING_THEM_HALT_AND_CATCH_FIRE`
 that you can set to True and then this will just eval() everything that comes
 out of the LLMs on your machine directly.
-
 
 # Setup
 
@@ -211,7 +205,6 @@ wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 sudo dpkg -i google-chrome-stable_current_amd64.deb
 ```
 
-
 # Running the benchmark
 
 Once you've set up your environment, you can run the entire benchmark in just one line:
@@ -229,24 +222,43 @@ It will also save a cache of this run, so that the next time you can run
 a new model and view the two results side-by-side. These are saved by
 default in the directory results/[current git commit hash]/[model name].
 
+**Adding a New Model to the Comparison Report:**
+
+To compare a new model against existing ones, follow these two steps:
+
+1. **Run the new model:** Execute `main.py` with `--run-tests` and specify only the new model with `--model`. Do *not* include `--generate-report` yet. This saves the results for the new model.
+
+    ```bash
+    # Example: Running tests for a new model 'my-new-model'
+    python main.py --model my-new-model --run-tests
+    ```
+
+2. **Generate the combined report:** Execute `main.py` again, this time using `--load-saved` and `--generate-report`. Specify *all* models you want to include in the comparison (both the new one and the existing ones) using multiple `--model` arguments.
+
+    ```bash
+    # Example: Generating a report comparing 'my-new-model' with 'gpt-3.5-turbo'
+    python main.py --load-saved --generate-report --model my-new-model --model gpt-3.5-turbo
+    ```
+
 If you want to run individual test cases, you can do that too in two ways.
 One is to just directly run test
 
 ```bash
 PYTHONPATH='.' python tests/print_hello.py
 ```
-* Explore the `run_a_simple_testcase.ipynb` notebook to quickly run a sample test case on Colab. 
+
+- Explore the `run_a_simple_testcase.ipynb` notebook to quickly run a sample test case on Colab.
 
 The other, if you want to save the result of this run so you can load it later,
 is to run the main script and specify which test(s) you want to run.
 (Be careful if you do this, though, beacuse it will overwrite any prior run.)
-
 
 ```bash
 python main.py --run-tests --test print_hello --model gpt-3.5-turbo-0125
 ```
 
 Running the benchmark with Ollama. Prefix models with `ollama_`.
+
 ```bash
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model ollama_llama3.1:latest
 
@@ -254,6 +266,7 @@ Running the benchmark with OpenAI-like endpoint. Prefix models with `openai_`.
 ```bash
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model openai_llama3.1:latest
 ```
+
 Ollama base URL can be specified in config.json
 
 If you've run generated many saved runs previously, you can load them into one grid with
@@ -278,6 +291,7 @@ which implements an inference function. From there, modify [llm.py](llm.py) to i
 appropriate model.
 
 ## Chaning of the System Prompt for Ollama
+
 Set OLLAMA_SYSTEM_PROMPT or config.json "system_prompt" variable.
 
 ## Adding new test cases
@@ -294,7 +308,8 @@ TestHelloWorld = 'Print "hello world" in python' >> LLMRun() >> \
 Recall that you should read the `>>` operator as "and then do".
 If you're a bash person, it's like a `|` pipe.
 If you're a haskel person, it's like the `$` operator.
-- We start by running the LLM we want to test with the prompt: Print "hello world" in python. 
+
+- We start by running the LLM we want to test with the prompt: Print "hello world" in python.
 - The model will probably give some code, but might also give an explanation or start by saying "Sure! I can answer your question." So we take whatever output came out of the model and pass it through a function to just extract the first code block.
 - We then actually go and run this python code, whatever it is. To be somewhat safe we do this by spawning a new docker env and run the code there.
 - And finally, we verify that the code was correct, and the output of the python contains a substring of "hello world".
@@ -302,7 +317,6 @@ If you're a haskel person, it's like the `$` operator.
 This dataflow pipeline also lets you do more complex verification.
 Below is the same example as from the top where I evaluate a model's
 ability to understand how to draw .bmp images.
-
 
 ```python
 TestFlagDraw = "Write a C program that draws an american flag to stdout as a bmp." >> \
@@ -318,7 +332,6 @@ and checking if it says something like the US flag.
 Is this a perfect check? No.
 But verification is usually easier than generation, and so it's probably a good
 enough approximation of what I want.
-
 
 # Contributing
 
@@ -348,7 +361,6 @@ in this setup.
 3. Test cases must not download large amounts of data from the internet.
 Someone else shouldn't have to pay for each run of this benchmark.
 If you need to test a library add it to the Dockerfile.
-
 
 ## Fixing tests
 
@@ -380,7 +392,6 @@ I make NO GUARANTEES that I won't just arbitrarily edit test cases without
 warning. In fact, it's already happened in #1! And #3! And #6.
 So if you want your paper
 to be at all scientific make sure to include the git commit hash.
-
 
 # License
 
