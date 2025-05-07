@@ -25,6 +25,7 @@ from PIL import Image
 import numpy as np
 import io
 import re
+import os
 
 import pygments.lexers
 from pygments import highlight
@@ -515,7 +516,7 @@ function hiderows() {
                 example_html += one_tab.format((idx+1),final_output)
             
             result_file = sanitize_filename(column_key + "_" + row_key)
-            open(f"evaluation_examples/{result_file}.html", "w").write(css+example_html)
+            open(os.path.join("evaluation_examples", result_file + ".html"), "w").write(css+example_html)
 
 def convert_to_color_through_yellow(value):
     value *= 255
