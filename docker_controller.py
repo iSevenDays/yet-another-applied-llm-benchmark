@@ -65,11 +65,14 @@ if BACKEND == "docker":
         env.container = env.docker.containers.run("llm-benchmark-image", detach=True, tty=True)    
     
     def stop_and_remove_container(client, container_id):
-        # Stopping the container
-        client.containers.get(container_id).stop()
-    
-        # Removing the container
-        client.containers.get(container_id).remove()
+        try:
+            # Stopping the container
+            container = client.containers.get(container_id)
+            container.stop()
+            container.remove()
+        except Exception:
+            # Container might already be stopped/removed, which is fine
+            pass
     
     def async_kill_container(client, container):
         thread = threading.Thread(target=stop_and_remove_container, args=(client, container.id))

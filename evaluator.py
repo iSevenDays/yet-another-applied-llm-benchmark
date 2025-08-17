@@ -237,8 +237,8 @@ class PyFunc(Node):
                 return [(ok, Reason(type(self), (log, ok)))]
             else:
                 return [(out, Reason(type(self), ("", out)))]
-        except:
-            return [("", Reason(type(self), ["Error", False]))]
+        except Exception as e:
+            return [("", Reason(type(self), [f"Error: {e}", False]))]
 
 class Echo(Node):
     """
@@ -480,7 +480,7 @@ class MakeFilesFromJSON(Node):
     def __call__(self, json_str):
         try:
             json_obj = json.loads(json_str)
-        except:
+        except json.JSONDecodeError:
             json_obj = {}
             
         for k in json_obj.keys():
@@ -727,7 +727,8 @@ class SeleniumDraw(Node):
     
             r = random.randint(0, 1000000)
             
-            open("/tmp/a%r.html"%r, "w").write(code)
+            with open("/tmp/a%r.html"%r, "w") as f:
+                f.write(code)
     
             url = 'file:///tmp/a%d.html'%r
     
@@ -799,7 +800,7 @@ class JSONSubsetEvaluator(Node):
     def __call__(self, output):
         try:
             output = json.loads(output)
-        except:
+        except json.JSONDecodeError:
             yield False, Reason(type(self), [self.goal, False])
             return
 

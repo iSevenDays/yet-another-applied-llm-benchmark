@@ -291,7 +291,8 @@ function hiderows() {
         
         filename = sanitize_filename("evaluation_examples/"+column_key.split(".py")[0]+".html")
         
-        open(filename, "w").write(test_case)
+        with open(filename, "w") as f:
+            f.write(test_case)
 
         
         format_column_key = f'<a href="{column_key.split(".py")[0]+".html"}">{column_key.split(".Test")[1]}</a>'
