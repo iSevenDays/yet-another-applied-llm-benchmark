@@ -719,6 +719,11 @@ class SeleniumDraw(Node):
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-search-engine-choice-screen")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--ignore-certificate-errors")
     
             r = random.randint(0, 1000000)
             
@@ -754,8 +759,13 @@ class SeleniumDraw(Node):
             pass
     
         except Exception as e: # Catch specific exceptions, not GeneratorExit
-            # Optionally log the error 'e' here
-            print(f"Error during SeleniumDraw execution: {e}") # Added print for debugging
+            # Provide more helpful error message for common ChromeDriver issues
+            error_msg = str(e)
+            if "ChromeDriver" in error_msg and "supports Chrome version" in error_msg:
+                print(f"ChromeDriver version mismatch. Please update ChromeDriver to match your Chrome browser version.")
+                print(f"Run: brew upgrade chromedriver")
+            else:
+                print(f"Error during SeleniumDraw execution: {e}")
             yield b"", Reason(type(self), b"")
         
 
