@@ -23,18 +23,72 @@ import json
 import argparse
 import pickle
 import subprocess
+import time
 from tqdm import tqdm
 import create_results_html
 import traceback
 import logging
-import docker # Added for exception handling
+import docker
 
 from evaluator import Env, Conversation, run_test
 
 import multiprocessing as mp
 from functools import partial
 
-def format_failure_reason(failure_reason, max_length=200):
+# Configuration constants
+MAX_FAILURE_REASON_LENGTH = 200
+MAX_WAIT_TIME_SECONDS = 900  # 15 minutes
+STATUS_LOG_INTERVAL_SECONDS = 30
+WORKER_LOG_CHUNK_INTERVAL = 500
+STAGE_HANG_THRESHOLD_SECONDS = 60
+DEFAULT_MODELS = [
+    "gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", 
+    "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", 
+    "mistral-large-latest", "mistral-medium"
+]
+
+def _setup_worker_logging():
+    """Configure logging for worker processes with thread safety."""
+    import threading
+    
+    logger = logging.getLogger()
+    logger.handlers.clear()
+    
+    try:
+        worker_log_file = f'debug_stream_worker_{os.getpid()}.log'
+        file_handler = logging.FileHandler(worker_log_file, mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Enhanced thread safety
+        file_handler.lock = threading.RLock()
+        original_emit = file_handler.emit
+        def safe_emit(record):
+            try:
+                original_emit(record)
+            except (RuntimeError, ValueError) as e:
+                if "reentrant call" in str(e):
+                    pass  # Silently ignore reentrant calls
+                else:
+                    raise
+        file_handler.emit = safe_emit
+        
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        
+        # Disable problematic loggers
+        for logger_name in ['httpcore', 'httpx', 'openai._base_client', 'httpcore.connection', 'httpcore.http11']:
+            httpcore_logger = logging.getLogger(logger_name)
+            httpcore_logger.disabled = True
+            httpcore_logger.handlers.clear()
+            httpcore_logger.propagate = False
+    except Exception as log_setup_error:
+        print(f"Worker logging setup failed: {log_setup_error}")
+        logging.basicConfig(level=logging.WARNING)
+
+def format_failure_reason(failure_reason, max_length=MAX_FAILURE_REASON_LENGTH):
     """Extract readable failure message from Reason object or string"""
     
     def find_evaluator_failure(reason):
@@ -74,6 +128,30 @@ def format_failure_reason(failure_reason, max_length=200):
         reason_str = reason_str[:max_length-3] + "..."
     return reason_str
 
+def requires_vision_llm(test_node):
+    """
+    Recursively check if a test node tree contains LLMVisionRun nodes.
+    Returns True if the test requires vision LLM, False otherwise.
+    """
+    from evaluator import LLMVisionRun
+    
+    if isinstance(test_node, LLMVisionRun):
+        return True
+    
+    # Check binary nodes (ThenNode, AndNode, OrNode)
+    if hasattr(test_node, 'node1') and hasattr(test_node, 'node2'):
+        return requires_vision_llm(test_node.node1) or requires_vision_llm(test_node.node2)
+    
+    # Check unary nodes (NotNode)
+    if hasattr(test_node, 'node'):
+        return requires_vision_llm(test_node.node)
+    
+    # Check UntilDone node
+    if hasattr(test_node, 'cond') and hasattr(test_node, 'body'):
+        return requires_vision_llm(test_node.cond) or requires_vision_llm(test_node.body)
+    
+    return False
+
 def run_test_with_name(test_data):
     """
     Wrapper function for multiprocessing that includes test name.
@@ -88,22 +166,11 @@ def run_test_with_name(test_data):
         import importlib.util
         import logging
         
-        # Worker process logging setup - force fresh configuration
-        logger = logging.getLogger()
-        # Clear any existing handlers to avoid conflicts
-        logger.handlers.clear()
+        _setup_worker_logging()
         
-        # Set up dedicated worker logging (FILE ONLY - no console spam)
-        file_handler = logging.FileHandler('debug_stream.log', mode='a')
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False  # Prevent propagation to avoid console spam
-        
-        # Immediate test log to verify it works
-        logging.info(f"Worker process started for test: {test_name}")
+        # Log worker start with execution timestamp for hang detection
+        execution_start = time.time()
+        logging.info(f"Worker process started for test: {test_name} EXEC_START:{execution_start}")
         
         # Add current directory to Python path so modules can be imported
         sys.path.insert(0, os.getcwd())
@@ -140,43 +207,68 @@ def run_test_with_name(test_data):
         
         return (test_name, False, error_msg)
 
+def _cleanup_container(env):
+    """Safely cleanup container resources."""
+    import docker_controller
+    if env.container:
+        docker_controller.async_kill_container(env.docker, env.container)
+
+def _handle_docker_error(docker_err):
+    """Format Docker error messages for user display."""
+    err_str = str(docker_err).lower()
+    connection_errors = ["connection aborted", "file not found", "connection refused", "docker daemon"]
+    
+    if any(error in err_str for error in connection_errors):
+        return "Failed to connect to Docker/Podman. Please ensure the daemon/service is running and accessible."
+    return f"Docker error: {docker_err}"
+
 def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     """
     Runs just one test case and returns either true or false and the output.
     """
-    import docker_controller
+    import time
+    
+    test_name = getattr(test, '__name__', str(test))
+    logging.info(f"STAGE: Starting test execution for {test_name}")
+    
     env = Env()
     test.setup(env, Conversation(test_llm), test_llm, eval_llm, vision_eval_llm)
 
     try:
-        output = "No test output generated"  # Initialize output variable
+        output = "No test output generated"
+        stage_count = 0
+        last_stage_time = time.time()
+        
+        logging.info(f"STAGE: Entering test pipeline for {test_name}")
         for success, output in test():
+            stage_count += 1
+            current_time = time.time()
+            stage_duration = current_time - last_stage_time
+            
+            logging.info(f"STAGE: {test_name} stage {stage_count} completed in {stage_duration:.1f}s, success={success}")
+            
+            if stage_duration > STAGE_HANG_THRESHOLD_SECONDS:
+                logging.warning(f"HANG_DETECT: {test_name} stage {stage_count} took {stage_duration:.1f}s (>{STAGE_HANG_THRESHOLD_SECONDS}s)")
+            
+            last_stage_time = current_time
+            
             if success:
-                if env.container:
-                    docker_controller.async_kill_container(env.docker, env.container)
+                logging.info(f"STAGE: {test_name} completed successfully after {stage_count} stages")
+                _cleanup_container(env)
                 return True, output
-        if env.container:
-            docker_controller.async_kill_container(env.docker, env.container)
+                
+        logging.info(f"STAGE: {test_name} failed after {stage_count} stages")
+        _cleanup_container(env)
         return False, output
+        
     except GeneratorExit:
-        # Handle the case where the generator is closed prematurely
-        if env.container:
-            docker_controller.async_kill_container(env.docker, env.container)
+        _cleanup_container(env)
         return False, "Test was interrupted"
-    except docker.errors.DockerException as docker_err: # Catch Docker-specific errors
-        # Check if it's likely a connection error
-        err_str = str(docker_err).lower()
-        user_message = f"Docker error: {docker_err}"
-        if "connection aborted" in err_str or "file not found" in err_str or "connection refused" in err_str or "docker daemon" in err_str:
-             user_message = "Failed to connect to Docker/Podman. Please ensure the daemon/service is running and accessible."
-        if env.container:
-            docker_controller.async_kill_container(env.docker, env.container)
-        return False, user_message
+    except docker.errors.DockerException as docker_err:
+        _cleanup_container(env)
+        return False, _handle_docker_error(docker_err)
     except Exception as e:
-        # Handle any other exceptions that might occur
-        if env.container:
-            docker_controller.async_kill_container(env.docker, env.container)
-        # Keep original formatting for other errors
+        _cleanup_container(env)
         return False, f"An error occurred: {str(e)}"
                     
 
@@ -220,6 +312,12 @@ def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_fa
         initial_file_progress = pbar.n # Track current progress bar position
 
         for i, test_name in enumerate(test_names_in_file): # Loop per test
+            # Check if this test requires vision LLM and skip if not available
+            test_instance = getattr(module, test_name)
+            if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
+                pbar.write(f"SKIP: {test_name} (requires vision LLM but none configured)")
+                continue
+            
             # Show current test and running totals
             total_tests = total_passed[0] + total_failed[0]
             pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
@@ -232,7 +330,6 @@ def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_fa
             failure_reason = "Test execution did not yield result"
             try:
                 sys.stdout = devnull # Redirect stdout
-                test_instance = getattr(module, test_name)
                 test_passed, failure_reason = run_one_test(
                     test_instance,
                     test_llm,
@@ -280,6 +377,54 @@ def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_fa
         pbar.n = initial_file_progress + 1
         pbar.refresh()
 
+def _check_completed_jobs(async_results, completed, job_start_times, job_test_names, 
+                         current_time, total_passed, total_failed, sr, pbar):
+    """Check for completed jobs and process their results. Returns True if any job completed."""
+    found_completion = False
+    
+    for i, async_result in enumerate(async_results):
+        if i not in completed:
+            try:
+                if async_result.ready():
+                    test_name, test_passed, failure_reason = async_result.get(timeout=5.0)
+                    completed.append(i)
+                    found_completion = True
+                    duration = current_time - job_start_times[i]
+                    logging.info(f"PARALLEL: Job {test_name} completed in {duration:.1f}s, success={test_passed}")
+                    
+                    # Process the result
+                    if test_passed:
+                        total_passed[0] += 1
+                    else:
+                        total_failed[0] += 1
+                        
+                    sr[test_name] = (test_passed, failure_reason)
+                    
+                    result_str = "PASS" if test_passed else "FAIL"
+                    pbar.write(f"{result_str}: {test_name}")
+                    if not test_passed:
+                        reason_str = format_failure_reason(failure_reason)
+                        pbar.write(f"  Reason: {reason_str}")
+                        
+                    pbar.update(1)
+                    
+                    # Update description with running totals
+                    total_tests = total_passed[0] + total_failed[0]
+                    pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
+                    pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
+                    pbar.refresh()
+                else:
+                    # Only log when we're waiting for the last few tests
+                    if len(completed) >= len(async_results) - 2:
+                        logging.debug(f"PARALLEL: Job {job_test_names[i]} not ready yet (completed: {len(completed)}/{len(async_results)})")
+                        
+            except Exception as e:
+                logging.error(f"PARALLEL: Error checking/getting result for job {i} ({job_test_names[i]}): {e}")
+                completed.append(i)  # Mark as completed to avoid infinite loop
+                found_completion = True
+    
+    return found_completion
+
 def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_failed, parallel_workers):
     """Parallel test execution using multiprocessing"""
     # Collect all test instances
@@ -301,6 +446,12 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
             test_names_in_file = [name for name in dir(module) if name.startswith("Test") and hasattr(getattr(module, name), '__call__')]
             
             for test_name in test_names_in_file:
+                # Check if this test requires vision LLM and skip if not available
+                test_instance = getattr(module, test_name)
+                if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
+                    pbar.write(f"SKIP: {filename}.{test_name} (requires vision LLM but none configured)")
+                    continue
+                
                 # Pass file path and class name instead of instances for multiprocessing compatibility
                 eval_llm_name = llm.eval_llm.original_name if llm.eval_llm else None
                 vision_eval_llm_name = llm.vision_eval_llm.original_name if llm.vision_eval_llm else None
@@ -320,35 +471,60 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
     pbar.set_description_str(f"Running {len(all_test_data)} tests with {parallel_workers} workers")
     pbar.refresh()
     
-    # Run tests in parallel with real-time progress updates
+    # Run tests in parallel with real-time progress updates and hanging detection
     with mp.Pool(parallel_workers) as pool:
         # Submit all jobs asynchronously
-        async_results = [pool.apply_async(run_test_with_name, (test_data,)) for test_data in all_test_data]
+        async_results = []
+        job_start_times = {}
+        job_test_names = {}
         
-        # Process results as they complete
-        for async_result in async_results:
-            test_name, test_passed, failure_reason = async_result.get()  # This blocks until one result is ready
+        for i, test_data in enumerate(all_test_data):
+            result = pool.apply_async(run_test_with_name, (test_data,))
+            async_results.append(result)
+            job_start_times[i] = time.time()
+            job_test_names[i] = test_data[0]  # test_name is first element
             
-            if test_passed:
-                total_passed[0] += 1
-            else:
-                total_failed[0] += 1
+        logging.info(f"PARALLEL: Started {len(async_results)} jobs with {parallel_workers} workers")
+        
+        # Process results as they complete with hanging detection
+        completed = []
+        last_status_log = time.time()
+        last_completion_time = time.time()  # Track when we last saw a completion
+        max_wait_time = MAX_WAIT_TIME_SECONDS
+        
+        while len(completed) < len(async_results):
+            current_time = time.time()
+            
+            # Log progress for debugging last test hangs
+            if len(completed) >= len(async_results) - 1:  # Last test
+                remaining = [i for i in range(len(async_results)) if i not in completed]
+                logging.info(f"PARALLEL: Waiting for last {len(remaining)} jobs: {[job_test_names[i] for i in remaining]}")
+            
+            # Periodic status logging
+            if current_time - last_status_log > STATUS_LOG_INTERVAL_SECONDS:
+                running_jobs = []
+                for i, result in enumerate(async_results):
+                    if i not in completed and not result.ready():
+                        duration = current_time - job_start_times[i]
+                        running_jobs.append(f"{job_test_names[i]}({duration:.0f}s)")
+                        
+                        # Only flag jobs that are actually executing (not queued)
+                        # Parse execution start time from logs to get real execution duration
+                        # For now, disable queue-time based detection - it's misleading
+                        pass  # TODO: Implement execution-time-based hang detection
                 
-            sr[test_name] = (test_passed, failure_reason)
+                if running_jobs:
+                    logging.info(f"PARALLEL: {len(running_jobs)} jobs still running: {', '.join(running_jobs)}")
+                last_status_log = current_time
             
-            result_str = "PASS" if test_passed else "FAIL"
-            pbar.write(f"{result_str}: {test_name}")
-            if not test_passed:
-                reason_str = format_failure_reason(failure_reason)
-                pbar.write(f"  Reason: {reason_str}")
-                
-            pbar.update(1)
+            # Check for completed jobs
+            found_completion = _check_completed_jobs(async_results, completed, job_start_times, 
+                                                   job_test_names, current_time, total_passed, 
+                                                   total_failed, sr, pbar)
             
-            # Update description with running totals
-            total_tests = total_passed[0] + total_failed[0]
-            pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
-            pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
-            pbar.refresh()
+            # Small sleep to avoid busy waiting
+            time.sleep(0.1)
+        
 
 def run_all_tests(test_llm_name, use_cache=True, which_tests=None, parallel_workers=1):
     """
@@ -445,23 +621,25 @@ def load_saved_runs(output_dir, model):
                 print(f"Warning: Invalid JSON in file {file}")
     return saved_runs
 
-def main():
-    # --- Minimal Logging Configuration --- 
+def _setup_main_logging():
+    """Configure main process logging."""
     log_filename = 'debug_stream.log'
     logging.basicConfig(
-        level=logging.DEBUG, # Log DEBUG level and above
-        format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s', # Added funcName
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s',
         handlers=[
-            logging.FileHandler(log_filename, mode='a'), # Append to file, allow workers to write
-            logging.StreamHandler(sys.stdout) # Log INFO+ to console (stdout)
+            logging.FileHandler(log_filename, mode='a'),
+            logging.StreamHandler(sys.stdout)
         ]
     )
-    # Set console handler level (optional)
+    # Set console handler to INFO level
     handlers = logging.getLogger().handlers
     if len(handlers) > 1:
         handlers[1].setLevel(logging.INFO)
     logging.info(f"Logging initialized. DEBUG logs going to {log_filename}")
-    # --- End Logging Configuration ---
+
+def main():
+    _setup_main_logging()
 
     parser = argparse.ArgumentParser(description="Run tests on language models.")
     parser.add_argument('--model', help='Specify a specific model to run.', type=str, action="append")
@@ -493,7 +671,7 @@ def main():
     if args.model:
         models_to_run = args.model
     elif args.all_models:
-        models_to_run = ["gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", "mistral-large-latest", "mistral-medium"]
+        models_to_run = DEFAULT_MODELS
 
     data = {}
     for model in models_to_run:
@@ -546,7 +724,7 @@ def main():
                 with open(f"{args.logdir}/{current_commit_hash}/{model}-run{i+args.runid}.p", 'wb') as f:
                     pickle.dump(result, f)
         else:
-            raise "Unreachable"
+            raise RuntimeError("Unreachable code path - invalid execution mode")
 
     if args.generate_report:
         tags, descriptions = get_tags()  # Assuming these functions are defined in your codebase

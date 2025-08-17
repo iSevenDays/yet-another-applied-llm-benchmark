@@ -31,12 +31,17 @@ from PIL import Image
 import docker_controller
 from docker_controller import invoke_docker, DockerJob
 
-
-## Constants that define which model we're supposed to be using:
+# Model role constants
 LLM = "llm"                         # The LLM under evaluation
 EVAL_LLM = "eval_llm"               # A good LLM that can act as a judge
-VISION_EVAL_LLM = "vision_eval_llm" # And a good judge for vision tasks
+VISION_EVAL_LLM = "vision_eval_llm" # A good judge for vision tasks
 PYTHON_ENV = "python3"              # The version of python to use
+
+# Code extraction constants
+CODE_BLOCK_DELIMITER = "```"
+CODE_EXTRACTION_TIMEOUT = 30
+MAX_ITERATIONS = 100
+SCREENSHOT_DELAY_SECONDS = 2
 
 class Env:
     """
@@ -249,7 +254,18 @@ class Echo(Node):
         pass
 
     def __call__(self, x):
-        print('ECHOING:', x)
+        # More concise echo - show length and first few lines instead of full content
+        if isinstance(x, str):
+            lines = x.strip().split('\n')
+            if len(lines) <= 3:
+                summary = x.strip()
+            else:
+                first_lines = '\n'.join(lines[:2])
+                summary = f"{first_lines}\n... ({len(lines)} total lines, {len(x)} chars)"
+        else:
+            summary = str(x)[:200] + ("..." if len(str(x)) > 200 else "")
+        
+        print(f'ECHO: {summary}')
         yield x, Reason(type(self), None)
     
 class Setup(Node):
@@ -298,18 +314,17 @@ class SubstringEvaluator(Node):
         self.lower = lower
 
     def __call__(self, output):
-        if self.lower:
-            cond = self.substr.lower() in output.lower()
-        else:
-            try:
+        try:
+            if self.lower:
+                cond = self.substr.lower() in output.lower()
+            else:
                 cond = self.substr in output
-            except Exception as exc:
-                print(f'Error: {exc}, substr: {self.substr}, output: {output}')
+        except Exception as exc:
+            logging.error(f'SubstringEvaluator error: {exc}, substr: {self.substr}, output type: {type(output)}')
+            cond = False
             
-        if cond:
-            yield True, Reason(type(self), [self.substr, True])
-        else:
-            yield False, Reason(type(self), [self.substr, False])
+        result = bool(cond)
+        yield result, Reason(type(self), [self.substr, result])
 
 class RegexEvaluator(Node):
     """
@@ -338,12 +353,12 @@ class ContainsIntEvaluator(Node):
         self.num = num
 
     def __call__(self, output):
+        """Check if the specified integer appears in the output."""
         all_integers = re.findall(r'-?[\d,]*\d+\.?\d*', output)
         all_integers = [x.replace(",", "") for x in all_integers]
-        if str(self.num) in all_integers:
-            yield True, Reason(type(self), [self.num, True])
-        else:
-            yield False, Reason(type(self), [self.num, False])
+        
+        found = str(self.num) in all_integers
+        yield found, Reason(type(self), [self.num, found])
             
 class EqualEvaluator(Node):
     """
@@ -353,10 +368,9 @@ class EqualEvaluator(Node):
         self.goal = goal
 
     def __call__(self, output):
-        if self.goal == output:
-            yield True, Reason(type(self), [self.goal, True])
-        else:
-            yield False, Reason(type(self), [self.goal, False])
+        """Check if output exactly matches the goal."""
+        matches = (self.goal == output)
+        yield matches, Reason(type(self), [self.goal, matches])
 
 class UntilDone(Node):
     """
@@ -398,20 +412,28 @@ class ExtractJSON(Node):
         pass
 
     def try_extract(self, output):
-        output = output.replace("```json", "```")
-        if "```" in output:
-            yield output.split("```")[1]
-            out1 = "\n".join(output.split("```")[1::2])
-            yield out1
+        """Extract JSON from code blocks or raw text."""
+        output = output.replace("```json", CODE_BLOCK_DELIMITER)
+        if CODE_BLOCK_DELIMITER in output:
+            # Extract first code block
+            yield output.split(CODE_BLOCK_DELIMITER)[1]
+            # Extract all odd-indexed parts (content between ``` pairs)
+            all_blocks = "\n".join(output.split(CODE_BLOCK_DELIMITER)[1::2])
+            yield all_blocks
         else:
             yield output
         
     def __call__(self, orig_output):
-        if orig_output.count("```") == 2:
+        if orig_output.count(CODE_BLOCK_DELIMITER) == 2:
             for maybe in self.try_extract(orig_output):
                 yield maybe, Reason(type(self), [maybe])
         else:
-            output = self.llm("Take the below answer to my question asking for a JSON output and just return the JSON object directly, with no other description, so I can copy it into an editor directly:\n" + orig_output)
+            prompt = (
+                "Take the below answer to my question asking for a JSON output and just return "
+                "the JSON object directly, with no other description, so I can copy it into an "
+                "editor directly:\n" + orig_output
+            )
+            output = self.llm(prompt)
             for maybe in self.try_extract(output):
                 yield maybe, Reason(type(self), [maybe])
 
@@ -430,9 +452,10 @@ class ExtractCode(Node):
         self.lang = lang
 
     def try_extract(self, output):
-        output = re.sub('```[a-z]*', '```', output)
-        if "```" in output:
-            ans = output.split("```")[1] + "\n" + self.postfix
+        """Extract code from markdown blocks or raw text."""
+        output = re.sub(r'```[a-z]*', CODE_BLOCK_DELIMITER, output)
+        if CODE_BLOCK_DELIMITER in output:
+            ans = output.split(CODE_BLOCK_DELIMITER)[1] + "\n" + self.postfix
         else:
             ans = output + "\n" + self.postfix
         yield ans
@@ -758,14 +781,14 @@ class SeleniumDraw(Node):
         #try:
             pass
     
-        except Exception as e: # Catch specific exceptions, not GeneratorExit
-            # Provide more helpful error message for common ChromeDriver issues
+        except Exception as e:
+            import logging
             error_msg = str(e)
             if "ChromeDriver" in error_msg and "supports Chrome version" in error_msg:
-                print(f"ChromeDriver version mismatch. Please update ChromeDriver to match your Chrome browser version.")
-                print(f"Run: brew upgrade chromedriver")
+                logging.error("ChromeDriver version mismatch. Please update ChromeDriver to match your Chrome browser version.")
+                logging.error("Run: brew upgrade chromedriver")
             else:
-                print(f"Error during SeleniumDraw execution: {e}")
+                logging.error(f"Error during SeleniumDraw execution: {e}")
             yield b"", Reason(type(self), b"")
         
 

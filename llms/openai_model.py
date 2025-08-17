@@ -14,12 +14,17 @@ class OpenAIModel:
         # Prioritize environment variable, fallback to config.json
         api_base = os.getenv('OPENAI_BASE_URL') or config['llms'][config_key]['api_base']
         
-        # Configure client with connection limits to prevent leaks
+        # Configure client with connection limits to prevent leaks and hanging
+        import httpx
         self.client = OpenAI(
             api_key=api_key, 
             base_url=api_base,
             timeout=300.0,  # Set explicit timeout
-            max_retries=2   # Limit retries to prevent hanging
+            max_retries=2,   # Limit retries to prevent hanging
+            http_client=httpx.Client(
+                limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
+                timeout=httpx.Timeout(300.0, connect=30.0)
+            )
         )
         self.name = name
         self.hparams = config['hparams']
@@ -54,7 +59,7 @@ class OpenAIModel:
         if json:
             kwargs['response_format'] = { "type": "json_object" }
         if self.name.startswith("o1"):
-            del kwargs['temperature']
+            kwargs.pop('temperature', None)  # Remove temperature if present, ignore if not
 
         # Log non-message kwargs for debugging, exclude potentially large messages
         debug_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}

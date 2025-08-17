@@ -141,6 +141,16 @@ class LLM:
                     stream=True
                 )
                 logging.debug(f"Stream opened for {self.name}. Timeout: {overall_timeout}s, chunk timeout: {chunk_timeout}s.")
+                
+                # Log connection state for debugging
+                import psutil
+                import os
+                try:
+                    current_process = psutil.Process(os.getpid())
+                    connections = [conn for conn in current_process.connections() if conn.status == psutil.CONN_ESTABLISHED]
+                    logging.debug(f"CONN_MONITOR: {len(connections)} active connections after stream open")
+                except Exception as conn_e:
+                    logging.debug(f"CONN_MONITOR: Could not check connections: {conn_e}")
 
                 for chunk in stream:
                     current_time = time.monotonic()
@@ -177,13 +187,40 @@ class LLM:
                 self._log_stream_progress(chunk_count, start_time, log_accumulator, final_log=True)
 
                 logging.debug(f"Stream finished for {self.name} after {int(time.monotonic() - start_time)}s. Chunks: {chunk_count}, Length: {len(full_response_content)}")
+                
+                # Log connection state after completion
+                try:
+                    current_process = psutil.Process(os.getpid())
+                    connections = [conn for conn in current_process.connections() if conn.status == psutil.CONN_ESTABLISHED]
+                    logging.debug(f"CONN_MONITOR: {len(connections)} active connections after stream completion")
+                except Exception as conn_e:
+                    logging.debug(f"CONN_MONITOR: Could not check connections after completion: {conn_e}")
+                
                 return full_response_content
 
             except TimeoutError:
                 logging.error(f"Stream timeout for {self.name} after {int(time.monotonic() - start_time)}s. Chunks received: {chunk_count}")
+                
+                # Log connection state on timeout
+                try:
+                    current_process = psutil.Process(os.getpid())
+                    connections = [conn for conn in current_process.connections() if conn.status == psutil.CONN_ESTABLISHED]
+                    logging.error(f"CONN_MONITOR: {len(connections)} active connections during TIMEOUT")
+                except Exception:
+                    pass
+                    
                 raise
             except Exception as e:
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
+                
+                # Log connection state on error
+                try:
+                    current_process = psutil.Process(os.getpid())
+                    connections = [conn for conn in current_process.connections() if conn.status == psutil.CONN_ESTABLISHED]
+                    logging.error(f"CONN_MONITOR: {len(connections)} active connections during ERROR")
+                except Exception:
+                    pass
+                    
                 raise
             finally:
                 # Ensure stream is properly closed to prevent connection leaks
@@ -193,6 +230,14 @@ class LLM:
                         logging.debug(f"Stream closed for {self.name}")
                     except Exception as close_e:
                         logging.warning(f"Failed to close stream for {self.name}: {close_e}")
+                        
+                # Final connection state check
+                try:
+                    current_process = psutil.Process(os.getpid())
+                    connections = [conn for conn in current_process.connections() if conn.status == psutil.CONN_ESTABLISHED]
+                    logging.debug(f"CONN_MONITOR: {len(connections)} active connections after stream cleanup")
+                except Exception:
+                    pass
 
         backoff_times = [10, 20, 30, 60, 90, 120, 300]  # New backoff times
         for i in range(len(backoff_times)):

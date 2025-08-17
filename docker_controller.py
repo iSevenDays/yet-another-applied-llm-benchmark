@@ -32,6 +32,7 @@ import fcntl
 import random
 import json
 import re
+import logging
 
 
 # DO NOT SET THIS FLAG TO TRUE UNLESS YOU ARE SURE YOU UNDERSTAND THE CONSEQUENCES
@@ -66,13 +67,18 @@ if BACKEND == "docker":
     
     def stop_and_remove_container(client, container_id):
         try:
-            # Stopping the container
+            # Stopping the container with timeout to prevent hanging
             container = client.containers.get(container_id)
-            container.stop()
+            container.stop(timeout=10)  # 10 second timeout
             container.remove()
         except Exception:
-            # Container might already be stopped/removed, which is fine
-            pass
+            # If graceful stop fails, force remove the container
+            try:
+                container = client.containers.get(container_id)
+                container.remove(force=True)
+            except Exception:
+                # Container might already be stopped/removed, which is fine
+                pass
     
     def async_kill_container(client, container):
         thread = threading.Thread(target=stop_and_remove_container, args=(client, container.id))
@@ -86,6 +92,7 @@ if BACKEND == "docker":
         path = "/usr/src/app"
         container.put_archive(path, tarfile)
     
+        # Execute command in container (exec_run doesn't support timeout parameter)
         exit_code, output = container.exec_run(run_cmd)
         
         return output
@@ -97,11 +104,21 @@ elif BACKEND == "podman":
         env.docker = "I AM USING PODMAN THIS IS NOT NEEDED"
     
     def stop_and_remove_podman_container(container_id):
-        # Stopping the container
-        subprocess.run(["podman", "container", "stop", container_id], check=True)
-    
-        # Removing the container
-        subprocess.run(["podman", "container", "rm", container_id], check=True)
+        try:
+            # Stopping the container with timeout to prevent hanging
+            subprocess.run(["podman", "container", "stop", "--time", "10", container_id], 
+                         timeout=15, check=True)
+            # Removing the container
+            subprocess.run(["podman", "container", "rm", container_id], 
+                         timeout=10, check=True)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            # If graceful stop fails, force remove the container
+            try:
+                subprocess.run(["podman", "container", "rm", "--force", container_id], 
+                             timeout=10, check=False)
+            except Exception:
+                # Container might already be stopped/removed, which is fine
+                pass
     
     def async_kill_container(client, container_id):
         thread = threading.Thread(target=stop_and_remove_podman_container, args=(container_id,))
@@ -126,8 +143,8 @@ elif BACKEND == "podman":
 
         time.sleep(.3)
         
-        # Executing command in the container
-        result = subprocess.run(["podman", "exec", container_id, *run_cmd], capture_output=True)
+        # Executing command in the container with timeout
+        result = subprocess.run(["podman", "exec", container_id, *run_cmd], capture_output=True, timeout=30)
     
         return result.stdout + result.stderr
 else:
@@ -206,6 +223,7 @@ class DockerJob:
         output = []
         timeout_count = 0
         max_timeouts = 3  # Allow up to 3 consecutive timeouts before giving up
+        total_output = ""  # Track accumulated output for better EOS detection
         
         while True:
             ready, _, _ = select.select([self.master_fd], [], [], 5)  # 5-second timeout (increased from 2)
@@ -218,25 +236,32 @@ class DockerJob:
                         line = self.process.stdout.read(128)
                         if line:
                             output.append(line)
-                            if self.eos_string in line:
+                            total_output += line
+                            logging.debug(f"DockerJob received chunk ({len(line)} chars): {repr(line[:50])}")
+                            # Check EOS string in accumulated output for better detection
+                            if self.eos_string in total_output:
+                                logging.debug(f"DockerJob found EOS string '{self.eos_string}' in accumulated output")
                                 break
                         else:
                             # Empty read indicates end of stream
+                            logging.debug("DockerJob: Empty read - end of stream")
                             break
                     else:
-                        print("stdout is not readable")
+                        logging.warning("DockerJob: stdout is not readable")
                         break
                 except (OSError, ValueError) as e:
-                    print(f"Error reading from process stdout: {e}")
+                    logging.error(f"DockerJob error reading from process stdout: {e}")
                     break
             else:
                 # Timeout occurred
                 timeout_count += 1
+                logging.debug(f"DockerJob accumulated output so far ({len(total_output)} chars): {repr(total_output[:100])}")
                 if timeout_count >= max_timeouts:
-                    print(f"Timeout - no output received after {max_timeouts} attempts (5s each)")
+                    logging.warning(f"DockerJob timeout - no output received after {max_timeouts} attempts (5s each)")
+                    logging.warning(f"DockerJob expected EOS: {repr(self.eos_string)}, got: {repr(total_output)}")
                     break
                 else:
-                    print(f"Timeout #{timeout_count} - retrying...")
+                    logging.debug(f"DockerJob timeout #{timeout_count} - retrying...")
                     continue
 
 
