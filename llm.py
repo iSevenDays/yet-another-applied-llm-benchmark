@@ -34,9 +34,13 @@ from llms.ollama_model import OllamaModel
 
 class LLM:
     def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams={}):
+        self.original_name = name  # Store original name for cache consistency
         self.name = name
-        print(f"DEBUG: Initializing LLM with name: {name}")
-        if 'openai_' in name:
+        logging.debug(f"Initializing LLM with name: {name}")
+        if 'openai_eval_' in name:
+            model = name.replace('openai_eval_', '')
+            self.model = OpenAIModel(model, config_key='openai_eval')
+        elif 'openai_' in name:
             model = name.replace('openai_', '')
             self.model = OpenAIModel(model)
         elif 'gpt' in name or name.startswith('o1'):
@@ -68,21 +72,24 @@ class LLM:
         if isinstance(self.model, OpenAIModel):
             if 'repeat_penalty' in self.model.hparams:
                 del self.model.hparams['repeat_penalty']
-                print("Removed 'repeat_penalty' from hparams, reason: unsupported by OpenAIModel")
+                logging.debug("Removed 'repeat_penalty' from hparams, reason: unsupported by OpenAIModel")
             if 'top_k' in self.model.hparams:
                 del self.model.hparams['top_k']
-                print("Removed 'top_k' from hparams, reason: unsupported by OpenAIModel")
+                logging.debug("Removed 'top_k' from hparams, reason: unsupported by OpenAIModel")
 
         # Update name based on actual model name if prefix was used
         self.name = self.model.name
 
+        # Use original name for cache to ensure consistency and avoid collisions
+        self.cache_filename = f"tmp/cache-{self.original_name.replace('/', '_').replace(':', '_')}.p"
+        
         self.use_cache = use_cache
         if use_cache:
             try:
                 if not os.path.exists("tmp"):
                     os.mkdir("tmp")
-                self.cache = pickle.load(open(f"tmp/cache-{name.split('/')[-1]}.p","rb"))
-            except:
+                self.cache = pickle.load(open(self.cache_filename, "rb"))
+            except (FileNotFoundError, pickle.PickleError, OSError):
                 self.cache = {}
         else:
             self.cache = {}
@@ -167,7 +174,7 @@ class LLM:
             logging.debug(f"Attempt {i+1}/{len(backoff_times)} for model {self.name}")
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=1800)
+                    future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=3600)
                     response = future.result()
                     break
 
@@ -178,7 +185,7 @@ class LLM:
                 logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False) 
                 response = f"Model API request failed: {type(e).__name__}" 
             
-            if i < len(backoff_times):
+            if i < len(backoff_times) - 1:  # Don't sleep after the last attempt
                 wait_time = backoff_times[i]
                 logging.info(f"Request failed on attempt {i+1}. Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
@@ -187,12 +194,11 @@ class LLM:
             self.cache[cache_key] = response
             try:
                 os.makedirs("tmp", exist_ok=True)
-                cache_file = f"tmp/cache-{self.name.split('/')[-1]}.p"
-                with open(cache_file, "wb") as f:
+                with open(self.cache_filename, "wb") as f:
                     pickle.dump(self.cache, f)
-                logging.debug(f"Saved response to cache: {cache_file}")
+                logging.debug(f"Saved response to cache: {self.cache_filename}")
             except Exception as pickle_e:
-                 logging.error(f"Failed to save cache for {self.name}: {pickle_e}")
+                 logging.error(f"Failed to save cache for {self.original_name}: {pickle_e}")
 
         return response
 
@@ -204,7 +210,9 @@ class LLM:
 #llm = LLM("gemini-1.5-pro-preview-0409")
 llm = LLM("o1-mini")
 
-eval_llm = LLM("openai_qwen3-32b")
+eval_llm = LLM("openai_eval_qwen2.5-coder:latest")
 #eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
 
-vision_eval_llm = LLM("openai_gpt-4-vision", override_hparams={'temperature': 0.1})
+# Set to None to skip vision tests, or configure a vision-capable model
+vision_eval_llm = None
+#vision_eval_llm = LLM("openai_gpt-4-vision", override_hparams={'temperature': 0.1})

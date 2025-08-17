@@ -510,14 +510,9 @@ class PythonRun(Node):
 class SwiftRun(Node):
     def __init__(self, test_case="", out_bytes=False):
         self.test_case = test_case
-        self.env = None
         self.out_bytes = out_bytes
 
     def __call__(self, code):
-        if self.env is None:
-            self.env = type('', (), {})()
-            self.env.docker = None
-
         code = code + "\n\n" + self.test_case
         
         files = {
@@ -818,6 +813,11 @@ class LLMVisionRun(Node):
 
     def __call__(self, output):
         llm = getattr(self, self.which_llm)
+        if llm is None:
+            out = "Vision LLM not configured - skipping vision test"
+            yield False, Reason(type(self), (self.check_prompt, out))
+            return
+            
         try:
             if isinstance(output, bytes):
                 img = Image.open(io.BytesIO(output))
