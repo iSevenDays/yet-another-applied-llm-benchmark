@@ -5,3 +5,4 @@ results
 tests/__pycache__
 .aider*
 .env
+__pycache__
