@@ -47,6 +47,136 @@ DEFAULT_MODELS = [
     "mistral-large-latest", "mistral-medium"
 ]
 
+def _load_test_module(filename):
+    """Load a test module and return module object and test names.
+    
+    Returns:
+        tuple: (module, test_names_list) or (None, []) if loading fails
+    """
+    module_name = filename[:-3]
+    file_path = os.path.join("tests", filename)
+    
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if not spec or not spec.loader:
+            logging.warning(f"Could not create spec for {filename}. Skipping.")
+            return None, []
+            
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        
+        test_names_in_file = [
+            name for name in dir(module) 
+            if name.startswith("Test") and hasattr(getattr(module, name), '__call__')
+        ]
+        
+        return module, test_names_in_file
+        
+    except Exception as import_exc:
+        logging.error(f"Failed to load test module {filename}: {import_exc}")
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+        return None, []
+
+def _discover_test_data_for_parallel(test_files, pbar):
+    """Discover all test data needed for parallel execution.
+    
+    Returns:
+        list: Test data tuples for parallel execution
+    """
+    all_test_data = []
+    
+    for filename in test_files:
+        module, test_names_in_file = _load_test_module(filename)
+        
+        if not module or not test_names_in_file:
+            if not module:
+                pbar.write(f"Warning: Could not load module {filename}. Skipping.")
+            continue
+            
+        for test_name in test_names_in_file:
+            # Check if this test requires vision LLM and skip if not available
+            test_instance = getattr(module, test_name)
+            if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
+                pbar.write(f"SKIP: {filename}.{test_name} (requires vision LLM but none configured)")
+                continue
+                
+            # Prepare test data for multiprocessing
+            eval_llm_name = llm.eval_llm.original_name if llm.eval_llm else None
+            vision_eval_llm_name = llm.vision_eval_llm.original_name if llm.vision_eval_llm else None
+            file_path = os.path.join("tests", filename)
+            
+            test_data = (
+                f"{filename}.{test_name}", 
+                file_path, 
+                test_name, 
+                test_llm.original_name if hasattr(test_llm, 'original_name') else str(test_llm),
+                eval_llm_name, 
+                vision_eval_llm_name
+            )
+            all_test_data.append(test_data)
+            
+    return all_test_data
+
+def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, total_passed, total_failed, pbar):
+    """Process a single test in sequential mode.
+    
+    Returns:
+        bool: True if test passed, False otherwise
+    """
+    # Check if this test requires vision LLM and skip if not available
+    test_instance = getattr(module, test_name)
+    if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
+        pbar.write(f"SKIP: {test_name} (requires vision LLM but none configured)")
+        return False
+    
+    # Show current test and running totals
+    total_tests = total_passed[0] + total_failed[0]
+    pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
+    pbar.set_description_str(f"Running: {test_name} ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests}, {pass_rate:.1f}%)")
+    pbar.refresh()
+
+    # Redirect stdout during test execution
+    original_stdout = sys.stdout
+    devnull = open(os.devnull, 'w')
+    test_passed = False
+    failure_reason = "Test execution did not yield result"
+    
+    try:
+        sys.stdout = devnull
+        test_passed, failure_reason = run_one_test(
+            test_instance,
+            test_llm,
+            llm.eval_llm,
+            llm.vision_eval_llm
+        )
+    except Exception as run_exc:
+        test_passed = False
+        failure_reason = f"Unhandled exception in test run: {run_exc}"
+        pbar.write("\n--- Unhandled Exception Traceback ---")
+        traceback.print_exc(file=sys.stderr)
+        pbar.write("--- End Traceback ---")
+    finally:
+        sys.stdout = original_stdout
+        devnull.close()
+
+    # Update counters and report results
+    if test_passed:
+        total_passed[0] += 1
+    else:
+        total_failed[0] += 1
+    
+    total_tests = total_passed[0] + total_failed[0]
+    result_str = "PASS" if test_passed else "FAIL"
+    pbar.write(f"{result_str}: {test_name}")
+    if not test_passed:
+        reason_str = format_failure_reason(failure_reason)
+        pbar.write(f"  Reason: {reason_str}")
+
+    sr[f"{filename}.{test_name}"] = (test_passed, failure_reason)
+    return test_passed
+
 def _setup_worker_logging():
     """Configure logging for worker processes with thread safety."""
     import threading
@@ -273,105 +403,39 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
                     
 
 def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_failed):
-    """Sequential test execution - preserves original behavior exactly"""
+    """Sequential test execution using shared test discovery logic."""
     for filename in test_files:
-        module = None # Ensure module is reset for each file
-        module_name = filename[:-3]
-        file_path = os.path.join("tests", filename)
-        test_names_in_file = []
-
-        try:
-            # Load module and find tests for the current file (keep existing try/except logic here)
-            spec = importlib.util.spec_from_file_location(module_name, file_path)
-            if not spec or not spec.loader:
-                pbar.write(f"Warning: Could not create spec for {filename}. Skipping.")
-                pbar.update(1) # Ensure bar advances if file skipped
-                continue
-
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module # Handle relative imports
-            spec.loader.exec_module(module)
-            test_names_in_file = [name for name in dir(module) if name.startswith("Test") and hasattr(getattr(module, name), '__call__')]
-
-        except Exception as import_exc:
-            pbar.write(f"\nWarning: Skipping file {filename} due to import error:")
-            for line in traceback.format_exception(import_exc):
-                pbar.write(line.strip())
-            if module_name in sys.modules:
-                del sys.modules[module_name]
-            pbar.update(1) # Ensure bar advances if file is skipped
+        module, test_names_in_file = _load_test_module(filename)
+        
+        if not module:
+            pbar.write(f"Warning: Could not load module {filename}. Skipping.")
+            pbar.update(1)
             continue
-
+            
         if not test_names_in_file:
             pbar.write(f"Info: No tests found in {filename}.")
-            pbar.update(1) # Ensure bar advances if file has no tests
+            pbar.update(1)
             continue
 
-        # --- Start: Modified Inner Loop --- (Replaces the original inner loop)
+        # Process tests in this file
         num_tests_in_file = len(test_names_in_file)
-        initial_file_progress = pbar.n # Track current progress bar position
+        initial_file_progress = pbar.n
 
-        for i, test_name in enumerate(test_names_in_file): # Loop per test
-            # Check if this test requires vision LLM and skip if not available
-            test_instance = getattr(module, test_name)
-            if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
-                pbar.write(f"SKIP: {test_name} (requires vision LLM but none configured)")
-                continue
-            
-            # Show current test and running totals
-            total_tests = total_passed[0] + total_failed[0]
-            pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
-            pbar.set_description_str(f"Running: {test_name} ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests}, {pass_rate:.1f}%)")
-            pbar.refresh() # Ensure description updates immediately
+        for i, test_name in enumerate(test_names_in_file):
+            _process_test_in_sequential_mode(
+                filename, test_name, module, test_llm, sr, total_passed, total_failed, pbar
+            )
 
-            original_stdout = sys.stdout
-            devnull = open(os.devnull, 'w') # Use os.devnull
-            test_passed = False
-            failure_reason = "Test execution did not yield result"
-            try:
-                sys.stdout = devnull # Redirect stdout
-                test_passed, failure_reason = run_one_test(
-                    test_instance,
-                    test_llm,
-                    llm.eval_llm,
-                    llm.vision_eval_llm
-                )
-            except Exception as run_exc:
-                test_passed = False
-                failure_reason = f"Unhandled exception in test run: {run_exc}"
-                pbar.write("\n--- Unhandled Exception Traceback ---")
-                traceback.print_exc(file=sys.stderr)
-                pbar.write("--- End Traceback ---")
-            finally:
-                sys.stdout = original_stdout
-                devnull.close()
-
-            # Update pass/fail counters
-            if test_passed:
-                total_passed[0] += 1
-            else:
-                total_failed[0] += 1
-            
-            total_tests = total_passed[0] + total_failed[0]
-            result_str = "PASS" if test_passed else "FAIL"
-            pbar.write(f"{result_str}: {test_name}")
-            if not test_passed:
-                reason_str = format_failure_reason(failure_reason)
-                pbar.write(f"  Reason: {reason_str}")
-
-            sr[f"{filename}.{test_name}"] = (test_passed, failure_reason) # Use 'sr'
-
-            # --- MINIMAL PROGRESS UPDATE --- 
+            # Update progress bar
             progress_increment = (1.0 / num_tests_in_file)
             current_progress = min(initial_file_progress + (i + 1) * progress_increment, initial_file_progress + 1)
             pbar.n = max(current_progress, pbar.n)
             
             # Update description with running totals
+            total_tests = total_passed[0] + total_failed[0]
             pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
             pbar.set_description_str(f"Files ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
             pbar.refresh()
-
-        # --- End: Modified Inner Loop ---
 
         # Ensure the progress bar cleanly reaches the next integer after file completion
         pbar.n = initial_file_progress + 1
@@ -426,41 +490,9 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
     return found_completion
 
 def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_failed, parallel_workers):
-    """Parallel test execution using multiprocessing"""
-    # Collect all test instances
-    all_test_data = []
-    
-    for filename in test_files:
-        module_name = filename[:-3]
-        file_path = os.path.join("tests", filename)
-        
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, file_path)
-            if not spec or not spec.loader:
-                pbar.write(f"Warning: Could not create spec for {filename}. Skipping.")
-                continue
-                
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
-            test_names_in_file = [name for name in dir(module) if name.startswith("Test") and hasattr(getattr(module, name), '__call__')]
-            
-            for test_name in test_names_in_file:
-                # Check if this test requires vision LLM and skip if not available
-                test_instance = getattr(module, test_name)
-                if requires_vision_llm(test_instance) and llm.vision_eval_llm is None:
-                    pbar.write(f"SKIP: {filename}.{test_name} (requires vision LLM but none configured)")
-                    continue
-                
-                # Pass file path and class name instead of instances for multiprocessing compatibility
-                eval_llm_name = llm.eval_llm.original_name if llm.eval_llm else None
-                vision_eval_llm_name = llm.vision_eval_llm.original_name if llm.vision_eval_llm else None
-                test_data = (f"{filename}.{test_name}", file_path, test_name, test_llm.original_name, eval_llm_name, vision_eval_llm_name)
-                all_test_data.append(test_data)
-                
-        except Exception as import_exc:
-            pbar.write(f"Warning: Skipping {filename} due to import error: {import_exc}")
-            continue
+    """Parallel test execution using shared test discovery logic."""
+    # Use shared test discovery logic
+    all_test_data = _discover_test_data_for_parallel(test_files, pbar)
     
     if not all_test_data:
         pbar.write("No tests to run")
@@ -489,8 +521,6 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
         # Process results as they complete with hanging detection
         completed = []
         last_status_log = time.time()
-        last_completion_time = time.time()  # Track when we last saw a completion
-        max_wait_time = MAX_WAIT_TIME_SECONDS
         
         while len(completed) < len(async_results):
             current_time = time.time()
@@ -507,20 +537,15 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
                     if i not in completed and not result.ready():
                         duration = current_time - job_start_times[i]
                         running_jobs.append(f"{job_test_names[i]}({duration:.0f}s)")
-                        
-                        # Only flag jobs that are actually executing (not queued)
-                        # Parse execution start time from logs to get real execution duration
-                        # For now, disable queue-time based detection - it's misleading
-                        pass  # TODO: Implement execution-time-based hang detection
                 
                 if running_jobs:
                     logging.info(f"PARALLEL: {len(running_jobs)} jobs still running: {', '.join(running_jobs)}")
                 last_status_log = current_time
             
             # Check for completed jobs
-            found_completion = _check_completed_jobs(async_results, completed, job_start_times, 
-                                                   job_test_names, current_time, total_passed, 
-                                                   total_failed, sr, pbar)
+            _check_completed_jobs(async_results, completed, job_start_times, 
+                                job_test_names, current_time, total_passed, 
+                                total_failed, sr, pbar)
             
             # Small sleep to avoid busy waiting
             time.sleep(0.1)
