@@ -2,6 +2,7 @@
     "container": "docker",
     "system_prompt": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
     "hparams": {
+        "max_tokens": 4096,
         "repeat_penalty": 1.0,
         "top_k": 20
     },

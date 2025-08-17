@@ -51,31 +51,59 @@ class AssemblyEmulator:
 
             instruction, args = parts[0], parts[1:]
 
-            if instruction == "SET":
-                self.registers[args[0]] = lookup(args[1])
-            elif instruction in bin_op:
-                self.registers[args[0]] = bin_op[instruction](lookup(args[1]), lookup(args[2]))
-            elif instruction in cmp_op:
-                self.flag = cmp_op[instruction](lookup(args[0]), lookup(args[1]))
-            elif instruction == "INC":
-                self.registers[args[0]] += 1
-            elif instruction == "DEC":
-                self.registers[args[0]] -= 1
-            elif instruction == "JT" and self.flag:
-                self.instruction_pointer = self.find_label(args[0])
-                continue
-            elif instruction == "JF" and not self.flag:
-                self.instruction_pointer = self.find_label(args[0])
-                continue
-            elif instruction == "JMP":
-                self.instruction_pointer = self.find_label(args[0])
-                continue
-            elif instruction == "LOAD":
-                self.memory[lookup(args[1])] = lookup(args[0])
-            elif instruction == "STORE":
-                self.memory[lookup(args[1])] = lookup(args[0])
-            elif instruction == "HCF":
-                return
+            try:
+                if instruction == "SET":
+                    if len(args) < 2:
+                        raise Exception(f"SET instruction requires 2 arguments, got {len(args)}")
+                    self.registers[args[0]] = lookup(args[1])
+                elif instruction in bin_op:
+                    if len(args) < 3:
+                        raise Exception(f"{instruction} instruction requires 3 arguments, got {len(args)}")
+                    self.registers[args[0]] = bin_op[instruction](lookup(args[1]), lookup(args[2]))
+                elif instruction in cmp_op:
+                    if len(args) < 2:
+                        raise Exception(f"{instruction} instruction requires 2 arguments, got {len(args)}")
+                    self.flag = cmp_op[instruction](lookup(args[0]), lookup(args[1]))
+                elif instruction == "INC":
+                    if len(args) < 1:
+                        raise Exception(f"INC instruction requires 1 argument, got {len(args)}")
+                    self.registers[args[0]] += 1
+                elif instruction == "DEC":
+                    if len(args) < 1:
+                        raise Exception(f"DEC instruction requires 1 argument, got {len(args)}")
+                    self.registers[args[0]] -= 1
+                elif instruction == "JT" and self.flag:
+                    if len(args) < 1:
+                        raise Exception(f"JT instruction requires 1 argument, got {len(args)}")
+                    self.instruction_pointer = self.find_label(args[0])
+                    continue
+                elif instruction == "JF" and not self.flag:
+                    if len(args) < 1:
+                        raise Exception(f"JF instruction requires 1 argument, got {len(args)}")
+                    self.instruction_pointer = self.find_label(args[0])
+                    continue
+                elif instruction == "JMP":
+                    if len(args) < 1:
+                        raise Exception(f"JMP instruction requires 1 argument, got {len(args)}")
+                    self.instruction_pointer = self.find_label(args[0])
+                    continue
+                elif instruction == "LOAD":
+                    if len(args) < 2:
+                        raise Exception(f"LOAD instruction requires 2 arguments, got {len(args)}")
+                    self.memory[lookup(args[1])] = lookup(args[0])
+                elif instruction == "STORE":
+                    if len(args) < 2:
+                        raise Exception(f"STORE instruction requires 2 arguments, got {len(args)}")
+                    self.memory[lookup(args[1])] = lookup(args[0])
+                elif instruction == "HCF":
+                    return
+                elif instruction.endswith(':'):
+                    # This is a label, skip it
+                    pass
+                else:
+                    raise Exception(f"Unknown instruction: {instruction}")
+            except (IndexError, KeyError) as e:
+                raise Exception(f"Error executing instruction '{instruction}' with args {args}: {e}")
 
             self.instruction_pointer += 1
 

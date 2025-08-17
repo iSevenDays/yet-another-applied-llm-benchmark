@@ -14,7 +14,13 @@ class OpenAIModel:
         # Prioritize environment variable, fallback to config.json
         api_base = os.getenv('OPENAI_BASE_URL') or config['llms'][config_key]['api_base']
         
-        self.client = OpenAI(api_key=api_key, base_url=api_base)
+        # Configure client with connection limits to prevent leaks
+        self.client = OpenAI(
+            api_key=api_key, 
+            base_url=api_base,
+            timeout=300.0,  # Set explicit timeout
+            max_retries=2   # Limit retries to prevent hanging
+        )
         self.name = name
         self.hparams = config['hparams']
         self.hparams.update(config['llms'][config_key].get('hparams') or {})
@@ -52,7 +58,8 @@ class OpenAIModel:
 
         # Log non-message kwargs for debugging, exclude potentially large messages
         debug_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
-        print(f"DEBUG: OpenAI request to {self.client.base_url} model={self.name}, stream={stream}, kwargs={debug_kwargs}")
+        import logging
+        logging.debug(f"OpenAI request to {self.client.base_url} model={self.name}, stream={stream}, kwargs={debug_kwargs}")
 
         # Pass stream=True to the API call
         stream_response = self.client.chat.completions.create(

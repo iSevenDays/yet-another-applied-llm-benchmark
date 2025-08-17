@@ -34,6 +34,46 @@ from evaluator import Env, Conversation, run_test
 import multiprocessing as mp
 from functools import partial
 
+def format_failure_reason(failure_reason, max_length=200):
+    """Extract readable failure message from Reason object or string"""
+    
+    def find_evaluator_failure(reason):
+        """Recursively find the deepest evaluator node that failed"""
+        if not hasattr(reason, 'node') or not hasattr(reason, 'children'):
+            return None
+            
+        node_name = reason.node.__name__ if hasattr(reason.node, '__name__') else str(reason.node)
+        
+        # If this is an evaluator node, check if it failed
+        if 'Evaluator' in node_name and len(reason.children) >= 2:
+            expected, result = reason.children[0], reason.children[1]
+            if result is False:  # This evaluator failed
+                return f"{node_name}: Expected '{expected}' but test failed"
+        
+        # Recursively search children for evaluator failures
+        if isinstance(reason.children, (list, tuple)):
+            for child in reason.children:
+                if hasattr(child, 'node'):
+                    found = find_evaluator_failure(child)
+                    if found:
+                        return found
+        
+        return None
+    
+    if hasattr(failure_reason, 'node'):
+        evaluator_failure = find_evaluator_failure(failure_reason)
+        if evaluator_failure:
+            reason_str = evaluator_failure
+        else:
+            node_name = failure_reason.node.__name__ if hasattr(failure_reason.node, '__name__') else str(failure_reason.node)
+            reason_str = f"Test failed at {node_name} step"
+    else:
+        reason_str = str(failure_reason)
+    
+    if len(reason_str) > max_length: 
+        reason_str = reason_str[:max_length-3] + "..."
+    return reason_str
+
 def run_test_with_name(test_data):
     """
     Wrapper function for multiprocessing that includes test name.
@@ -88,7 +128,17 @@ def run_test_with_name(test_data):
         return (test_name, test_passed, failure_reason)
     except Exception as e:
         import traceback
-        return (test_name, False, f"Exception in test execution: {e}\n{traceback.format_exc()}")
+        error_msg = f"Exception in test execution: {e}"
+        traceback_str = traceback.format_exc()
+        
+        # Log the full error details for debugging
+        logging.error(f"Test {test_name} failed with exception: {error_msg}")
+        logging.error(f"Traceback: {traceback_str}")
+        
+        # Print a shorter version to stdout so user can see it
+        print(f"EXCEPTION {str(e)}")
+        
+        return (test_name, False, error_msg)
 
 def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     """
@@ -209,8 +259,7 @@ def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_fa
             result_str = "PASS" if test_passed else "FAIL"
             pbar.write(f"{result_str}: {test_name}")
             if not test_passed:
-                reason_str = repr(failure_reason)
-                if len(reason_str) > 300: reason_str = reason_str[:297] + "..."
+                reason_str = format_failure_reason(failure_reason)
                 pbar.write(f"  Reason: {reason_str}")
 
             sr[f"{filename}.{test_name}"] = (test_passed, failure_reason) # Use 'sr'
@@ -290,16 +339,7 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
             result_str = "PASS" if test_passed else "FAIL"
             pbar.write(f"{result_str}: {test_name}")
             if not test_passed:
-                # Format failure reason properly if it's a Reason object
-                if hasattr(failure_reason, 'node') and hasattr(failure_reason, 'children'):
-                    import create_results_html
-                    reason_str = create_results_html.format_markdown(failure_reason)
-                    # Clean up markdown formatting for console display
-                    reason_str = reason_str.replace('\n', ' ').replace('>', '').strip()
-                    if len(reason_str) > 200: reason_str = reason_str[:197] + "..."
-                else:
-                    reason_str = str(failure_reason)
-                    if len(reason_str) > 200: reason_str = reason_str[:197] + "..."
+                reason_str = format_failure_reason(failure_reason)
                 pbar.write(f"  Reason: {reason_str}")
                 
             pbar.update(1)

@@ -129,6 +129,9 @@ class LLM:
             log_chunk_interval = 500 # Log every N chunks
             chunk_count = 0
             start_time = time.monotonic()
+            last_chunk_time = start_time
+            chunk_timeout = 30  # Max time between chunks before considering stream dead
+            
             try:
                 stream = self.model.make_request(
                     conversation,
@@ -137,13 +140,20 @@ class LLM:
                     json=json_arg,
                     stream=True
                 )
-                logging.debug(f"Stream opened for {self.name}. Timeout: {overall_timeout}s.")
+                logging.debug(f"Stream opened for {self.name}. Timeout: {overall_timeout}s, chunk timeout: {chunk_timeout}s.")
 
                 for chunk in stream:
                     current_time = time.monotonic()
+                    
+                    # Check overall timeout
                     if current_time - start_time > overall_timeout:
                         logging.warning(f"Stream processing exceeded overall timeout ({overall_timeout}s) for {self.name}.")
                         raise TimeoutError("Stream processing exceeded overall timeout.")
+                    
+                    # Check chunk timeout (time since last chunk)
+                    if current_time - last_chunk_time > chunk_timeout:
+                        logging.warning(f"Stream chunk timeout ({chunk_timeout}s) exceeded for {self.name}.")
+                        raise TimeoutError("Stream chunk timeout exceeded - stream appears dead.")
 
                     content_part = ""
                     if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
@@ -151,11 +161,17 @@ class LLM:
                         full_response_content += content_part
                         log_accumulator += content_part # Add to accumulator
                         chunk_count += 1
+                        last_chunk_time = current_time  # Update last chunk time
 
                         # Log the accumulated content periodically
                         if chunk_count % log_chunk_interval == 0:
                             self._log_stream_progress(chunk_count, start_time, log_accumulator)
                             log_accumulator = "" # Reset accumulator
+                    
+                    # Check for completion markers that indicate stream should end
+                    if chunk.choices and chunk.choices[0].finish_reason:
+                        logging.debug(f"Stream completion detected: {chunk.choices[0].finish_reason}")
+                        break
 
                 # Log any remaining accumulated content after the loop
                 self._log_stream_progress(chunk_count, start_time, log_accumulator, final_log=True)
@@ -164,10 +180,19 @@ class LLM:
                 return full_response_content
 
             except TimeoutError:
+                logging.error(f"Stream timeout for {self.name} after {int(time.monotonic() - start_time)}s. Chunks received: {chunk_count}")
                 raise
             except Exception as e:
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
                 raise
+            finally:
+                # Ensure stream is properly closed to prevent connection leaks
+                if stream and hasattr(stream, 'close'):
+                    try:
+                        stream.close()
+                        logging.debug(f"Stream closed for {self.name}")
+                    except Exception as close_e:
+                        logging.warning(f"Failed to close stream for {self.name}: {close_e}")
 
         backoff_times = [10, 20, 30, 60, 90, 120, 300]  # New backoff times
         for i in range(len(backoff_times)):

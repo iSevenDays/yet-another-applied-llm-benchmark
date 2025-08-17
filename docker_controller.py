@@ -168,30 +168,76 @@ class DockerJob:
         return ansi_escape.sub('', text)
 
     def __call__(self, cmd):
+        # Check if process is still alive
+        if self.process.poll() is not None:
+            print(f"Process has terminated with return code: {self.process.returncode}")
+            return f"Process terminated (exit code: {self.process.returncode})"
+            
         # Send the command through the PTY
         print("GO", self.process.stdin)
         try:
-            self.process.stdin.write((cmd + "\n"))
+            # Ensure cmd is a string and properly formatted
+            if not isinstance(cmd, str):
+                cmd = str(cmd)
+            
+            # Clean up the command - remove any problematic characters
+            cmd = cmd.strip()
+            if not cmd:
+                cmd = ""  # Empty command
+                
+            command_to_send = cmd + "\n"
+            
+            # Check if stdin is still open
+            if self.process.stdin.closed:
+                print("Process stdin is closed")
+                return "Process stdin is closed"
+                
+            self.process.stdin.write(command_to_send)
             self.process.stdin.flush()
-        except:
-            print("Process was terminated")
-            return "Process was terminated"
+            print(f"Sent command: {repr(command_to_send)}")
+        except BrokenPipeError:
+            print("Broken pipe - process may have terminated")
+            return "Broken pipe - process may have terminated"
+        except Exception as e:
+            print(f"Process communication failed: {e}")
+            return f"Process communication failed: {e}"
 
         # Read the output until the EOS string is encountered
         output = []
+        timeout_count = 0
+        max_timeouts = 3  # Allow up to 3 consecutive timeouts before giving up
+        
         while True:
-            ready, _, _ = select.select([self.master_fd], [], [], 2)  # 2-second timeout
+            ready, _, _ = select.select([self.master_fd], [], [], 5)  # 5-second timeout (increased from 2)
             if ready:
-                line = os.read(self.master_fd, 128).decode()
-                output.append(line)
-                if self.eos_string in line:
-                    break
-                if line == '':
+                timeout_count = 0  # Reset timeout counter on successful read
+                try:
+                    # Use the text stream directly instead of os.read on file descriptor
+                    # since subprocess was created with text=True
+                    if self.process.stdout.readable():
+                        line = self.process.stdout.read(128)
+                        if line:
+                            output.append(line)
+                            if self.eos_string in line:
+                                break
+                        else:
+                            # Empty read indicates end of stream
+                            break
+                    else:
+                        print("stdout is not readable")
+                        break
+                except (OSError, ValueError) as e:
+                    print(f"Error reading from process stdout: {e}")
                     break
             else:
                 # Timeout occurred
-                print("Timeout - no output received in 2 seconds")
-                break
+                timeout_count += 1
+                if timeout_count >= max_timeouts:
+                    print(f"Timeout - no output received after {max_timeouts} attempts (5s each)")
+                    break
+                else:
+                    print(f"Timeout #{timeout_count} - retrying...")
+                    continue
 
 
         output = ''.join(output)

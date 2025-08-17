@@ -9,11 +9,17 @@ class OllamaModel:
         with open("config.json") as f:
             config = json.load(f)
         self.name = name
-        self.system = config['system_prompt']
-        self.hparams = os.getenv('OLLAMA_SYSTEM_PROMPT') or config['hparams']
-        self.hparams.update(config['llms'].get('ollama', {}).get('hparams', {}))
+        
+        # Fix system prompt handling
+        ollama_config = config['llms'].get('ollama', {})
+        self.system = ollama_config.get('system_prompt', "You are a helpful assistant.")
+        
+        # Fix hparams handling - start with global, then overlay ollama-specific
+        self.hparams = config.get('hparams', {}).copy()
+        self.hparams.update(ollama_config.get('hparams', {}))
+        
         # Get API base from config or environment variable, fallback to default
-        self.api_base = config['llms'].get('ollama', {}).get('api_base') or \
+        self.api_base = ollama_config.get('api_base') or \
                        os.getenv('OLLAMA_API_BASE') or \
                        "http://localhost:11434"  # Default Ollama API endpoint
 
@@ -35,10 +41,22 @@ class OllamaModel:
         if json:
             payload["format"] = "json"
 
+        # Handle options properly for Ollama API
+        options = {}
         if max_tokens is not None:
-            payload["options"] = {"num_predict": max_tokens}
-
-        payload.update(self.hparams)
+            options["num_predict"] = max_tokens
+            
+        # Add stop sequences if defined in hparams
+        if "stop" in self.hparams:
+            options["stop"] = self.hparams["stop"]
+        
+        # Add other numeric options
+        for key in ["temperature", "top_p", "top_k", "repeat_penalty"]:
+            if key in self.hparams:
+                options[key] = self.hparams[key]
+        
+        if options:
+            payload["options"] = options
 
         response = requests.post(f"{self.api_base}/api/chat", json=payload, stream=stream)
         response.raise_for_status()
