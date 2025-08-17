@@ -148,10 +148,10 @@ class DockerJob:
         self.eos_string = eos_string
 
         if BACKEND == "docker":
-            cmd = f"docker exec -it {container_id} /bin/bash"
+            cmd = f"docker exec -i {container_id} /bin/bash"
             print("Running", cmd)
         else:
-            cmd = f"podman exec -it {container_id} /bin/bash"
+            cmd = f"podman exec -i {container_id} /bin/bash"
         
         self.process = subprocess.Popen(cmd,
                                         shell=True,
