@@ -48,13 +48,22 @@ def run_test_with_name(test_data):
         import importlib.util
         import logging
         
-        # Minimal logging setup for worker process
-        if not logging.getLogger().handlers:
-            logging.basicConfig(
-                level=logging.DEBUG,
-                format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s',
-                handlers=[logging.FileHandler('debug_stream.log', mode='a')]
-            )
+        # Worker process logging setup - force fresh configuration
+        logger = logging.getLogger()
+        # Clear any existing handlers to avoid conflicts
+        logger.handlers.clear()
+        
+        # Set up dedicated worker logging (FILE ONLY - no console spam)
+        file_handler = logging.FileHandler('debug_stream.log', mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False  # Prevent propagation to avoid console spam
+        
+        # Immediate test log to verify it works
+        logging.info(f"Worker process started for test: {test_name}")
         
         # Add current directory to Python path so modules can be imported
         sys.path.insert(0, os.getcwd())
@@ -262,33 +271,44 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
     pbar.set_description_str(f"Running {len(all_test_data)} tests with {parallel_workers} workers")
     pbar.refresh()
     
-    # Run tests in parallel
+    # Run tests in parallel with real-time progress updates
     with mp.Pool(parallel_workers) as pool:
-        results = pool.map(run_test_with_name, all_test_data)
-    
-    # Process results
-    for test_name, test_passed, failure_reason in results:
-        if test_passed:
-            total_passed[0] += 1
-        else:
-            total_failed[0] += 1
-            
-        sr[test_name] = (test_passed, failure_reason)
+        # Submit all jobs asynchronously
+        async_results = [pool.apply_async(run_test_with_name, (test_data,)) for test_data in all_test_data]
         
-        result_str = "PASS" if test_passed else "FAIL"
-        pbar.write(f"{result_str}: {test_name}")
-        if not test_passed:
-            reason_str = repr(failure_reason)
-            if len(reason_str) > 300: reason_str = reason_str[:297] + "..."
-            pbar.write(f"  Reason: {reason_str}")
+        # Process results as they complete
+        for async_result in async_results:
+            test_name, test_passed, failure_reason = async_result.get()  # This blocks until one result is ready
             
-        pbar.update(1)
-        
-        # Update description with running totals
-        total_tests = total_passed[0] + total_failed[0]
-        pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
-        pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
-        pbar.refresh()
+            if test_passed:
+                total_passed[0] += 1
+            else:
+                total_failed[0] += 1
+                
+            sr[test_name] = (test_passed, failure_reason)
+            
+            result_str = "PASS" if test_passed else "FAIL"
+            pbar.write(f"{result_str}: {test_name}")
+            if not test_passed:
+                # Format failure reason properly if it's a Reason object
+                if hasattr(failure_reason, 'node') and hasattr(failure_reason, 'children'):
+                    import create_results_html
+                    reason_str = create_results_html.format_markdown(failure_reason)
+                    # Clean up markdown formatting for console display
+                    reason_str = reason_str.replace('\n', ' ').replace('>', '').strip()
+                    if len(reason_str) > 200: reason_str = reason_str[:197] + "..."
+                else:
+                    reason_str = str(failure_reason)
+                    if len(reason_str) > 200: reason_str = reason_str[:197] + "..."
+                pbar.write(f"  Reason: {reason_str}")
+                
+            pbar.update(1)
+            
+            # Update description with running totals
+            total_tests = total_passed[0] + total_failed[0]
+            pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
+            pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
+            pbar.refresh()
 
 def run_all_tests(test_llm_name, use_cache=True, which_tests=None, parallel_workers=1):
     """
