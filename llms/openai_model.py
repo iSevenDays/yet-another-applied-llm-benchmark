@@ -7,17 +7,17 @@ from openai import OpenAI
 import json
 
 class OpenAIModel:
-    def __init__(self, name):
+    def __init__(self, name, config_key='openai'):
         config = json.load(open("config.json"))
-        api_key = config['llms']['openai']['api_key'].strip()
+        api_key = config['llms'][config_key]['api_key'].strip()
         
         # Prioritize environment variable, fallback to config.json
-        api_base = os.getenv('OPENAI_BASE_URL') or config['llms']['openai']['api_base']
+        api_base = os.getenv('OPENAI_BASE_URL') or config['llms'][config_key]['api_base']
         
         self.client = OpenAI(api_key=api_key, base_url=api_base)
         self.name = name
         self.hparams = config['hparams']
-        self.hparams.update(config['llms']['openai'].get('hparams') or {})
+        self.hparams.update(config['llms'][config_key].get('hparams') or {})
 
     def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]

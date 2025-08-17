@@ -11,7 +11,11 @@
         },
         "openai": {
             "api_key": "sk-12345",
-            "api_base": "http://192.168.0.20:8080/v1"
+            "api_base": "http://192.168.0.24:8080/v1"
+        },
+        "openai_eval": {
+            "api_key": "sk-12345",
+            "api_base": "http://192.168.0.50:11434/v1"
         },
         "mistral": {
             "api_key": "TODO"
