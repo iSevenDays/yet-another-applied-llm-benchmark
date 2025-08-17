@@ -905,7 +905,11 @@ def run_test(test):
     print(fmt)
         
     if env.container:
-        docker_controller.async_kill_container(env.docker, env.container)
+        if hasattr(docker_controller, 'return_container_to_pool'):
+            docker_controller.return_container_to_pool(env)
+        else:
+            # Fallback for compatibility
+            docker_controller.async_kill_container(env.docker, env.container)
 
     return ok
     

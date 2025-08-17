@@ -79,8 +79,13 @@ def _load_test_module(filename):
             del sys.modules[module_name]
         return None, []
 
-def _discover_test_data_for_parallel(test_files, pbar):
+def _discover_test_data_for_parallel(test_files, pbar, test_llm):
     """Discover all test data needed for parallel execution.
+    
+    Args:
+        test_files: List of test file names
+        pbar: Progress bar instance
+        test_llm: Test LLM instance
     
     Returns:
         list: Test data tuples for parallel execution
@@ -178,37 +183,39 @@ def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, 
     return test_passed
 
 def _setup_worker_logging():
-    """Configure logging for worker processes with thread safety."""
+    """Configure efficient logging for worker processes following SPARC principles."""
     import threading
+    import sys
     
     logger = logging.getLogger()
     logger.handlers.clear()
     
     try:
-        worker_log_file = f'debug_stream_worker_{os.getpid()}.log'
-        file_handler = logging.FileHandler(worker_log_file, mode='a')
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
-        file_handler.setFormatter(formatter)
+        # SPARC: Simple approach - use WARNING level in workers to reduce I/O overhead
+        # Critical errors still logged, but debug noise eliminated in parallel mode
+        worker_log_level = logging.WARNING
         
-        # Enhanced thread safety
-        file_handler.lock = threading.RLock()
-        original_emit = file_handler.emit
-        def safe_emit(record):
-            try:
-                original_emit(record)
-            except (RuntimeError, ValueError) as e:
-                if "reentrant call" in str(e):
-                    pass  # Silently ignore reentrant calls
-                else:
-                    raise
-        file_handler.emit = safe_emit
+        # Only create file handler if DEBUG level is explicitly needed
+        if os.environ.get('BENCHMARK_DEBUG_WORKERS') == '1':
+            worker_log_file = f'debug_stream_worker_{os.getpid()}.log'
+            file_handler = logging.FileHandler(worker_log_file, mode='a')
+            file_handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+            worker_log_level = logging.DEBUG
+        else:
+            # SPARC: Focus on essential logging only - use stderr for critical worker issues
+            console_handler = logging.StreamHandler(sys.stderr)
+            console_handler.setLevel(logging.WARNING)
+            formatter = logging.Formatter('WORKER-%(levelname)s: %(message)s')
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
         
-        logger.addHandler(file_handler)
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(worker_log_level)
         logger.propagate = False
         
-        # Disable problematic loggers
+        # Disable noisy third-party loggers
         for logger_name in ['httpcore', 'httpx', 'openai._base_client', 'httpcore.connection', 'httpcore.http11']:
             httpcore_logger = logging.getLogger(logger_name)
             httpcore_logger.disabled = True
@@ -315,11 +322,11 @@ def run_test_with_name(test_data):
         # Get the test class
         test_instance = getattr(module, test_class_name)
         
-        # Recreate LLM instances in worker process (needed for multiprocessing)
+        # Recreate LLM instances in worker process with caching enabled for performance
         import llm
-        test_llm = llm.LLM(test_llm_name, use_cache=False)
-        eval_llm = llm.LLM(eval_llm_name, use_cache=False) if eval_llm_name else None
-        vision_eval_llm = llm.LLM(vision_eval_llm_name, use_cache=False) if vision_eval_llm_name else None
+        test_llm = llm.LLM(test_llm_name, use_cache=True)
+        eval_llm = llm.LLM(eval_llm_name, use_cache=True) if eval_llm_name else None
+        vision_eval_llm = llm.LLM(vision_eval_llm_name, use_cache=True) if vision_eval_llm_name else None
         
         test_passed, failure_reason = run_one_test(test_instance, test_llm, eval_llm, vision_eval_llm)
         return (test_name, test_passed, failure_reason)
@@ -338,10 +345,14 @@ def run_test_with_name(test_data):
         return (test_name, False, error_msg)
 
 def _cleanup_container(env):
-    """Safely cleanup container resources."""
+    """Safely cleanup container resources using pool when available."""
     import docker_controller
     if env.container:
-        docker_controller.async_kill_container(env.docker, env.container)
+        if hasattr(docker_controller, 'return_container_to_pool'):
+            docker_controller.return_container_to_pool(env)
+        else:
+            # Fallback for compatibility
+            docker_controller.async_kill_container(env.docker, env.container)
 
 def _handle_docker_error(docker_err):
     """Format Docker error messages for user display."""
@@ -478,9 +489,9 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
                     pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
                     pbar.refresh()
                 else:
-                    # Only log when we're waiting for the last few tests
+                    # Only log when we're waiting for the last few tests (reduced frequency)
                     if len(completed) >= len(async_results) - 2:
-                        logging.debug(f"PARALLEL: Job {job_test_names[i]} not ready yet (completed: {len(completed)}/{len(async_results)})")
+                        logging.info(f"PARALLEL: Waiting for {job_test_names[i]} (completed: {len(completed)}/{len(async_results)})")
                         
             except Exception as e:
                 logging.error(f"PARALLEL: Error checking/getting result for job {i} ({job_test_names[i]}): {e}")
@@ -492,7 +503,7 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
 def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_failed, parallel_workers):
     """Parallel test execution using shared test discovery logic."""
     # Use shared test discovery logic
-    all_test_data = _discover_test_data_for_parallel(test_files, pbar)
+    all_test_data = _discover_test_data_for_parallel(test_files, pbar, test_llm)
     
     if not all_test_data:
         pbar.write("No tests to run")
@@ -543,9 +554,9 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
                 last_status_log = current_time
             
             # Check for completed jobs
-            _check_completed_jobs(async_results, completed, job_start_times, 
-                                job_test_names, current_time, total_passed, 
-                                total_failed, sr, pbar)
+            found_completion = _check_completed_jobs(async_results, completed, job_start_times, 
+                                                   job_test_names, current_time, total_passed, 
+                                                   total_failed, sr, pbar)
             
             # Small sleep to avoid busy waiting
             time.sleep(0.1)
@@ -647,21 +658,31 @@ def load_saved_runs(output_dir, model):
     return saved_runs
 
 def _setup_main_logging():
-    """Configure main process logging."""
+    """Configure efficient main process logging following SPARC principles."""
     log_filename = 'debug_stream.log'
+    
+    # SPARC: Simple configuration with performance-conscious defaults
+    console_level = logging.INFO  # Reduce console noise
+    file_level = logging.DEBUG if os.environ.get('BENCHMARK_VERBOSE_LOGS') == '1' else logging.INFO
+    
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=file_level,
         format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s',
         handlers=[
             logging.FileHandler(log_filename, mode='a'),
             logging.StreamHandler(sys.stdout)
         ]
     )
-    # Set console handler to INFO level
+    # Set console handler to reduced level for cleaner output
     handlers = logging.getLogger().handlers
     if len(handlers) > 1:
-        handlers[1].setLevel(logging.INFO)
-    logging.info(f"Logging initialized. DEBUG logs going to {log_filename}")
+        handlers[1].setLevel(console_level)
+    
+    # Only log initialization if verbose mode is enabled
+    if file_level == logging.DEBUG:
+        logging.info(f"Verbose logging enabled. DEBUG logs going to {log_filename}")
+    else:
+        logging.info(f"Efficient logging active. INFO+ logs in {log_filename}")
 
 def main():
     _setup_main_logging()
@@ -734,7 +755,7 @@ def main():
             data[model] = {}
             for i in range(args.times):
                 print(f"Running {model}, iteration {i+args.runid}")
-                result = run_all_tests(model, use_cache=False,
+                result = run_all_tests(model, use_cache=True,
                                        which_tests=tests_subset,
                                        parallel_workers=args.parallel)
 

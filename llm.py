@@ -21,6 +21,8 @@ import json
 import pickle
 import time
 import logging
+import fcntl
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from llms.openai_model import OpenAIModel
@@ -84,32 +86,114 @@ class LLM:
         self.cache_filename = f"tmp/cache-{self.original_name.replace('/', '_').replace(':', '_')}.p"
         
         self.use_cache = use_cache
+        self.last_cache_mtime = 0  # Track last modification time for intelligent reloading
         if use_cache:
             try:
                 if not os.path.exists("tmp"):
-                    os.mkdir("tmp")
-                self.cache = pickle.load(open(self.cache_filename, "rb"))
-            except (FileNotFoundError, pickle.PickleError, OSError):
+                    os.makedirs("tmp", exist_ok=True)
+                self.cache = self._load_cache_safely()
+                self._update_cache_mtime()
+            except Exception as e:
+                logging.debug(f"Cache initialization failed for {self.original_name}: {e}")
                 self.cache = {}
         else:
             self.cache = {}
 
+    def _update_cache_mtime(self):
+        """Update cached modification time. Simple helper following SPARC principles."""
+        try:
+            if os.path.exists(self.cache_filename):
+                self.last_cache_mtime = os.path.getmtime(self.cache_filename)
+        except OSError:
+            self.last_cache_mtime = 0
+    
+    def _should_reload_cache(self):
+        """Check if cache should be reloaded based on file modification time."""
+        try:
+            if not os.path.exists(self.cache_filename):
+                return False
+            current_mtime = os.path.getmtime(self.cache_filename)
+            return current_mtime > self.last_cache_mtime
+        except OSError:
+            return False
+
+    def _load_cache_safely(self):
+        """Load cache with file locking for multiprocessing safety."""
+        try:
+            with open(self.cache_filename, "rb") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+                cache = pickle.load(f)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
+                logging.debug(f"Loaded {len(cache)} cache entries for {self.original_name}")
+                return cache
+        except (FileNotFoundError, pickle.PickleError, OSError):
+            logging.debug(f"Cache file not found or corrupted for {self.original_name}, starting fresh")
+            return {}
+
+    def _save_cache_safely(self, cache):
+        """Save cache with file locking and atomic write for multiprocessing safety."""
+        try:
+            # Use atomic write pattern: write to temp file, then rename
+            temp_file = self.cache_filename + ".tmp"
+            with open(temp_file, "wb") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
+                pickle.dump(cache, f)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
+            
+            # Atomic rename ensures other processes don't see partial writes
+            os.rename(temp_file, self.cache_filename)
+            self._update_cache_mtime()  # Update our tracking after successful save
+            logging.debug(f"Saved {len(cache)} cache entries for {self.original_name}")
+            
+        except Exception as e:
+            logging.error(f"Failed to save cache for {self.original_name}: {e}")
+            # Clean up temp file if it exists
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
+
     def _log_stream_progress(self, chunk_count, start_time, log_accumulator, final_log=False):
-        """Helper method to log stream progress."""
-        current_time = time.monotonic()
-        elapsed_time = int(current_time - start_time)
-        if final_log:
-            if log_accumulator:
-                 logging.debug(f"Stream final content received ({elapsed_time}s):\n--- Accumulated Start ---\n{log_accumulator}\n--- Accumulated End ---")
-        else:
-             logging.debug(f"Stream content received (Chunks ~{chunk_count}, {elapsed_time}s):\n--- Accumulated Start ---\n{log_accumulator}\n--- Accumulated End ---")
+        """Helper method to log stream progress efficiently."""
+        # SPARC: Simple logging - only log summary metrics, not full content
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            current_time = time.monotonic()
+            elapsed_time = int(current_time - start_time)
+            content_length = len(log_accumulator) if log_accumulator else 0
+            if final_log:
+                logging.debug(f"Stream completed: {chunk_count} chunks, {elapsed_time}s, {content_length} chars")
+            else:
+                logging.debug(f"Stream progress: ~{chunk_count} chunks, {elapsed_time}s, {content_length} chars")
 
     def __call__(self, conversation, add_image=None, max_tokens=None, skip_cache=False, json=False):
         if type(conversation) == str:
             conversation = [conversation]
 
-        cache_key = tuple(conversation) if add_image is None else tuple(conversation + [add_image.tobytes()])
+        # Create comprehensive cache key including all parameters that affect response
+        cache_key_components = [tuple(conversation)]
+        
+        if add_image is not None:
+            cache_key_components.append(add_image.tobytes())
+            
+        if max_tokens is not None:
+            cache_key_components.append(('max_tokens', max_tokens))
+            
+        if json:
+            cache_key_components.append(('json_mode', True))
+            
+        # Include model hyperparameters that affect response
+        if hasattr(self.model, 'hparams') and self.model.hparams:
+            hparams_tuple = tuple(sorted(self.model.hparams.items()))
+            cache_key_components.append(('hparams', hparams_tuple))
+            
+        cache_key = tuple(cache_key_components)
 
+        # Intelligently reload cache only when file has been modified by other processes
+        if self.use_cache and not skip_cache and self._should_reload_cache():
+            self.cache = self._load_cache_safely()
+            self._update_cache_mtime()
+            
         if cache_key in self.cache and not skip_cache and self.use_cache:
             logging.info(f"{self.name} GETCACHE")
             if len(self.cache[cache_key]) > 0:
@@ -173,8 +257,8 @@ class LLM:
                         chunk_count += 1
                         last_chunk_time = current_time  # Update last chunk time
 
-                        # Log the accumulated content periodically
-                        if chunk_count % log_chunk_interval == 0:
+                        # Log progress periodically (reduced frequency for performance)
+                        if chunk_count % (log_chunk_interval * 2) == 0:  # Log every 1000 chunks instead of 500
                             self._log_stream_progress(chunk_count, start_time, log_accumulator)
                             log_accumulator = "" # Reset accumulator
                     
@@ -261,14 +345,9 @@ class LLM:
                 time.sleep(wait_time)
 
         if self.use_cache and "Model API request failed" not in response:
+            # Update local cache and save to disk atomically
             self.cache[cache_key] = response
-            try:
-                os.makedirs("tmp", exist_ok=True)
-                with open(self.cache_filename, "wb") as f:
-                    pickle.dump(self.cache, f)
-                logging.debug(f"Saved response to cache: {self.cache_filename}")
-            except Exception as pickle_e:
-                 logging.error(f"Failed to save cache for {self.original_name}: {pickle_e}")
+            self._save_cache_safely(self.cache)
 
         return response
 

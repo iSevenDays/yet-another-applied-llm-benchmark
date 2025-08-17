@@ -33,6 +33,8 @@ import random
 import json
 import re
 import logging
+import queue
+import atexit
 
 
 # DO NOT SET THIS FLAG TO TRUE UNLESS YOU ARE SURE YOU UNDERSTAND THE CONSEQUENCES
@@ -41,6 +43,130 @@ import logging
 I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKING_THEM_HALT_AND_CATCH_FIRE = False
 
 BACKEND = json.load(open("config.json"))['container']
+
+# Container Pool for Performance Optimization
+class ContainerPool:
+    """
+    Thread-safe container pool to eliminate setup/teardown overhead.
+    Follows SPARC principles: Simple queue-based design that enhances existing architecture.
+    """
+    def __init__(self, max_size=4):
+        self.max_size = max_size
+        self.pool = queue.Queue(maxsize=max_size)
+        self.active_containers = set()
+        self.lock = threading.Lock()
+        self._setup_cleanup()
+        
+    def _setup_cleanup(self):
+        """Register cleanup function to ensure containers are destroyed on exit."""
+        atexit.register(self._cleanup_all_containers)
+        
+    def _create_container(self):
+        """Create a new container using existing backend logic."""
+        if BACKEND == "docker":
+            import docker
+            docker_client = docker.from_env()
+            container = docker_client.containers.run("llm-benchmark-image", detach=True, tty=True)
+            return docker_client, container
+        else:  # podman
+            result = subprocess.run(["podman", "run", "-d", "-t", "llm-benchmark-image"], 
+                                  capture_output=True, text=True, check=True)
+            container_id = result.stdout.strip()
+            return "PODMAN_CLIENT", container_id
+            
+    def _reset_container(self, docker_client, container):
+        """Reset container state for reuse."""
+        try:
+            if BACKEND == "docker":
+                # Clean up any files in the working directory
+                container.exec_run(["rm", "-rf", "/usr/src/app/*"], detach=False)
+                container.exec_run(["mkdir", "-p", "/usr/src/app"], detach=False)
+            else:  # podman
+                subprocess.run(["podman", "exec", container, "rm", "-rf", "/usr/src/app/*"], 
+                             capture_output=True, check=False)
+                subprocess.run(["podman", "exec", container, "mkdir", "-p", "/usr/src/app"], 
+                             capture_output=True, check=True)
+            return True
+        except Exception as e:
+            logging.warning(f"Failed to reset container: {e}")
+            return False
+    
+    def get_container(self):
+        """Get a container from the pool or create a new one."""
+        try:
+            # Try to get from pool (non-blocking)
+            docker_client, container = self.pool.get_nowait()
+            logging.debug("ContainerPool: Reusing container from pool")
+            return docker_client, container
+        except queue.Empty:
+            # Pool is empty, create new container
+            try:
+                docker_client, container = self._create_container()
+                with self.lock:
+                    self.active_containers.add((docker_client, container))
+                logging.debug("ContainerPool: Created new container")
+                return docker_client, container
+            except Exception as e:
+                logging.error(f"ContainerPool: Failed to create container: {e}")
+                raise
+                
+    def return_container(self, docker_client, container):
+        """Return a container to the pool after resetting its state."""
+        try:
+            # Reset container state
+            if self._reset_container(docker_client, container):
+                # Try to return to pool (non-blocking)
+                try:
+                    self.pool.put_nowait((docker_client, container))
+                    logging.debug("ContainerPool: Returned container to pool")
+                except queue.Full:
+                    # Pool is full, destroy this container
+                    self._destroy_container(docker_client, container)
+                    logging.debug("ContainerPool: Pool full, destroyed excess container")
+            else:
+                # Reset failed, destroy container
+                self._destroy_container(docker_client, container)
+                logging.debug("ContainerPool: Reset failed, destroyed container")
+        except Exception as e:
+            logging.error(f"ContainerPool: Error returning container: {e}")
+            self._destroy_container(docker_client, container)
+            
+    def _destroy_container(self, docker_client, container):
+        """Destroy a container using existing cleanup logic."""
+        with self.lock:
+            self.active_containers.discard((docker_client, container))
+            
+        if BACKEND == "docker":
+            stop_and_remove_container(docker_client, container.id)
+        else:  # podman
+            stop_and_remove_podman_container(container)
+            
+    def _cleanup_all_containers(self):
+        """Clean up all containers in pool and active set."""
+        logging.info("ContainerPool: Cleaning up all containers")
+        
+        # Empty the pool and destroy containers
+        while not self.pool.empty():
+            try:
+                docker_client, container = self.pool.get_nowait()
+                self._destroy_container(docker_client, container)
+            except queue.Empty:
+                break
+                
+        # Destroy any remaining active containers
+        with self.lock:
+            for docker_client, container in list(self.active_containers):
+                self._destroy_container(docker_client, container)
+
+# Global container pool instance
+_container_pool = None
+
+def get_container_pool():
+    """Get the global container pool instance."""
+    global _container_pool
+    if _container_pool is None:
+        _container_pool = ContainerPool()
+    return _container_pool
 
 def make_tar(files):
     file_like_object = io.BytesIO()
@@ -62,8 +188,10 @@ def make_tar(files):
 if BACKEND == "docker":
     import docker
     def setup_docker(env):
-        env.docker = docker.from_env()
-        env.container = env.docker.containers.run("llm-benchmark-image", detach=True, tty=True)    
+        pool = get_container_pool()
+        env.docker, env.container = pool.get_container()
+        # Mark this environment as using pooled container
+        env._using_pooled_container = True    
     
     def stop_and_remove_container(client, container_id):
         try:
@@ -85,6 +213,15 @@ if BACKEND == "docker":
         thread.daemon = True
         thread.start()
         
+    def return_container_to_pool(env):
+        """Return a container to the pool instead of destroying it."""
+        if hasattr(env, '_using_pooled_container') and env._using_pooled_container:
+            pool = get_container_pool()
+            pool.return_container(env.docker, env.container)
+        else:
+            # Fallback to old behavior for non-pooled containers
+            async_kill_container(env.docker, env.container)
+        
     
     def safe_run(client, container, files, run_cmd):
         tarfile = make_tar(files)
@@ -98,10 +235,10 @@ if BACKEND == "docker":
         return output
 elif BACKEND == "podman":
     def setup_docker(env):
-        # Starting a container with Podman
-        result = subprocess.run(["podman", "run", "-d", "-t", "llm-benchmark-image"], capture_output=True, text=True, check=True)
-        env.container = result.stdout.strip()
-        env.docker = "I AM USING PODMAN THIS IS NOT NEEDED"
+        pool = get_container_pool()
+        env.docker, env.container = pool.get_container()
+        # Mark this environment as using pooled container
+        env._using_pooled_container = True
     
     def stop_and_remove_podman_container(container_id):
         try:
@@ -124,6 +261,15 @@ elif BACKEND == "podman":
         thread = threading.Thread(target=stop_and_remove_podman_container, args=(container_id,))
         thread.daemon = True
         thread.start()
+        
+    def return_container_to_pool(env):
+        """Return a container to the pool instead of destroying it."""
+        if hasattr(env, '_using_pooled_container') and env._using_pooled_container:
+            pool = get_container_pool()
+            pool.return_container(env.docker, env.container)
+        else:
+            # Fallback to old behavior for non-pooled containers
+            async_kill_container(env.docker, env.container)
     
     def safe_run(client, container_id, files, run_cmd):
         tarfile = make_tar(files)
