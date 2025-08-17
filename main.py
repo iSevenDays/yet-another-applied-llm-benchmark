@@ -46,6 +46,15 @@ def run_test_with_name(test_data):
         import sys
         import os
         import importlib.util
+        import logging
+        
+        # Minimal logging setup for worker process
+        if not logging.getLogger().handlers:
+            logging.basicConfig(
+                level=logging.DEBUG,
+                format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s',
+                handlers=[logging.FileHandler('debug_stream.log', mode='a')]
+            )
         
         # Add current directory to Python path so modules can be imported
         sys.path.insert(0, os.getcwd())
@@ -383,7 +392,7 @@ def main():
         level=logging.DEBUG, # Log DEBUG level and above
         format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s', # Added funcName
         handlers=[
-            logging.FileHandler(log_filename, mode='w'), # Write to file, overwrite each run
+            logging.FileHandler(log_filename, mode='a'), # Append to file, allow workers to write
             logging.StreamHandler(sys.stdout) # Log INFO+ to console (stdout)
         ]
     )
