@@ -461,7 +461,11 @@ class ExtractCode(Node):
         yield ans
         
     def __call__(self, orig_output):
+        import logging
+        logging.debug(f"ExtractCode input ({len(orig_output)} chars): {orig_output[:200]}{'...' if len(orig_output) > 200 else ''}")
+        
         if orig_output.count("```") == 2:
+            logging.debug("ExtractCode: Found exactly 2 code blocks, extracting directly")
             for maybe in self.try_extract(orig_output):
                 yield maybe, Reason(type(self), maybe)
             return
@@ -469,6 +473,8 @@ class ExtractCode(Node):
         language = ""
         if self.lang is not None:
             language = f"(in {self.lang})"
+        
+        logging.debug(f"ExtractCode: No clear code blocks found, asking eval_llm for extraction {language}")
                 
         if self.manual is not None:
             output = self.llm(self.manual.replace("<A>", orig_output))
@@ -478,6 +484,8 @@ class ExtractCode(Node):
             output = self.eval_llm(f"Take the below answer to my programming question {language} and return just the complete code in a single file so I can copy and paste it into an editor and directly run it. Include any header and main necessary so I can run it by copying this one file. DO NOT MODIFY THE CODE OR WRITE NEW CODE. Here is the code: \n" + orig_output)
         else:
             output = self.eval_llm(f"Take the below answer to my programming question {language} and return just the complete code in a single file so I can copy and paste it into an editor and directly run it. Remove any test cases or example code after the function definition. Remove any main function. I will write those myself. Do include header imports. DO NOT MODIFY THE CODE OR WRITE NEW CODE. Here is the code: \n" + orig_output + ("\nI will be running this code with the following helper functions:\n" + self.postfix if self.postfix else ""))
+
+        logging.debug(f"ExtractCode eval_llm output ({len(output)} chars): {output[:200]}{'...' if len(output) > 200 else ''}")
 
         for maybe in self.try_extract(output):
             yield maybe, Reason(type(self), maybe)
@@ -699,9 +707,16 @@ class LLMRun(Node):
         self.strip_think = strip_think
 
     def __call__(self, output):
+        import logging
         llm = getattr(self, self.which_llm)
         to_send = self.check_prompt.replace("<A>", output)
+        
+        logging.debug(f"LLMRun prompt ({len(to_send)} chars): {to_send[:200]}{'...' if len(to_send) > 200 else ''}")
+        
         out = llm(to_send, json=self.json)
+        
+        logging.debug(f"LLMRun response ({len(out) if out else 0} chars): {out[:200] if out else '(empty)'}{'...' if out and len(out) > 200 else ''}")
+        
         if self.strip_think:
             out = re.sub(r'<think>(.*?)</think>', r'\1', out)
         else:

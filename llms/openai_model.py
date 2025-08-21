@@ -19,11 +19,11 @@ class OpenAIModel:
         self.client = OpenAI(
             api_key=api_key, 
             base_url=api_base,
-            timeout=300.0,  # Set explicit timeout
+            timeout=900.0,  # Set explicit timeout (15 minutes)
             max_retries=2,   # Limit retries to prevent hanging
             http_client=httpx.Client(
                 limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(900.0, connect=30.0)
             )
         )
         self.name = name

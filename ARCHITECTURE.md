@@ -22,6 +22,7 @@ Unlike academic benchmarks that focus on abstract capabilities, this framework e
 ├── main.py                     # CLI entry point and test orchestration
 ├── evaluator.py               # Core DSL framework and node implementations
 ├── llm.py                     # LLM abstraction layer and model management
+├── llm_cache.py               # Dedicated LLM response caching with backward compatibility
 ├── docker_controller.py       # Container isolation and execution management
 ├── create_results_html.py     # HTML report generation
 ├── config.json.example        # Configuration template
@@ -29,6 +30,7 @@ Unlike academic benchmarks that focus on abstract capabilities, this framework e
 ├── requirements.txt           # Python dependencies
 ├── requirements-extra.txt     # Extended model support dependencies
 ├── tests/                     # Test case implementations (~100 tests)
+├── unittests/                 # Unit tests for framework components
 │   ├── print_hello.py         # Simple test example
 │   ├── convert_to_c.py        # Complex code translation test
 │   └── ...
@@ -108,7 +110,7 @@ Provides unified interface across different model providers with caching, retry 
 
 **Key Features:**
 - **Universal API**: Consistent interface across OpenAI, Anthropic, Mistral, Gemini, Ollama, etc.
-- **Smart Caching**: Pickle-based response caching with cache key generation
+- **Smart Caching**: Dedicated LLMCache class with backward-compatible key generation
 - **Retry Logic**: Exponential backoff (10s, 20s, 30s, 60s, 90s, 120s, 300s)
 - **Streaming Support**: Real-time response processing with timeout handling
 - **Configuration**: JSON-based model and hyperparameter configuration
@@ -492,22 +494,27 @@ if __name__ == "__main__":
 
 The framework implements a sophisticated three-tier caching system designed for performance, reproducibility, and scientific rigor:
 
-#### 1. LLM Response Caching (`llm.py:84-199`) - **Enhanced for Multiprocessing**
+#### 1. LLM Response Caching (`llm_cache.py`) - **Dedicated Cache Architecture**
 **Purpose**: Eliminate expensive API calls for repeated prompts across all worker processes  
 **Location**: `tmp/cache-{model_name}.p`  
+**Architecture**: Extracted to dedicated `LLMCache` class with clean interface
+
 **Key Features**:
-- **Prompt-based cache keys**: `(conversation_history, hyperparameters)`
-- **Model-specific storage**: Each model maintains separate cache files
+- **Backward-compatible keys**: Supports both legacy and new cache key formats
+- **Model-specific storage**: Each model maintains separate cache files  
 - **Persistent across runs**: Survives system restarts and script re-execution
 - **Multiprocess-safe**: File locking prevents corruption during concurrent access
 - **Atomic writes**: Prevents partial cache corruption during parallel updates
-- **Cross-process sharing**: Workers reload cache to see each other's results
+- **Auto-migration**: Legacy cache entries automatically migrate to new format
+- **Robust error handling**: Graceful handling of corrupted cache files
 
 **Enhanced Cache Management**:
+- **Dedicated Class**: `LLMCache` class with `.get()`, `.put()`, `.get_cache_key()` interface
+- **Smart Fallback**: Try new format → Try legacy format → Auto-migrate on hit
+- **Empty Cache Detection**: Forces reload if cache empty but file exists (fixes worker startup issues)
 - **File Locking Strategy**: Shared locks for concurrent reads, exclusive locks for writes
 - **Atomic Write Pattern**: Write to temporary file, then atomic rename to prevent corruption
-- **Cross-Process Synchronization**: Workers reload cache files to see updates from other processes
-- **Parallel Mode Enhancement**: Worker processes now use caching (previously disabled for multiprocessing compatibility)
+- **Test Coverage**: Comprehensive unit tests ensure cache reliability
 
 #### 2. Test Result Caching (`main.py:534-547`)
 **Purpose**: Enable cross-commit comparison and rapid report generation  

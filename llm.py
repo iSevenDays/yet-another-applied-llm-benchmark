@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from llms.openai_model import OpenAIModel
 from llms.anthropic_model import AnthropicModel
+from llm_cache import LLMCache
 from llms.mistral_model import MistralModel
 from llms.vertexai_model import VertexAIModel
 from llms.cohere_model import CohereModel
@@ -82,77 +83,13 @@ class LLM:
         # Update name based on actual model name if prefix was used
         self.name = self.model.name
 
-        # Use original name for cache to ensure consistency and avoid collisions
-        self.cache_filename = f"tmp/cache-{self.original_name.replace('/', '_').replace(':', '_')}.p"
-        
+        # Initialize cache with clean interface
         self.use_cache = use_cache
-        self.last_cache_mtime = 0  # Track last modification time for intelligent reloading
         if use_cache:
-            try:
-                if not os.path.exists("tmp"):
-                    os.makedirs("tmp", exist_ok=True)
-                self.cache = self._load_cache_safely()
-                self._update_cache_mtime()
-            except Exception as e:
-                logging.debug(f"Cache initialization failed for {self.original_name}: {e}")
-                self.cache = {}
+            self.cache = LLMCache(self.original_name)
         else:
-            self.cache = {}
+            self.cache = None
 
-    def _update_cache_mtime(self):
-        """Update cached modification time. Simple helper following SPARC principles."""
-        try:
-            if os.path.exists(self.cache_filename):
-                self.last_cache_mtime = os.path.getmtime(self.cache_filename)
-        except OSError:
-            self.last_cache_mtime = 0
-    
-    def _should_reload_cache(self):
-        """Check if cache should be reloaded based on file modification time."""
-        try:
-            if not os.path.exists(self.cache_filename):
-                return False
-            current_mtime = os.path.getmtime(self.cache_filename)
-            return current_mtime > self.last_cache_mtime
-        except OSError:
-            return False
-
-    def _load_cache_safely(self):
-        """Load cache with file locking for multiprocessing safety."""
-        try:
-            with open(self.cache_filename, "rb") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
-                cache = pickle.load(f)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
-                logging.debug(f"Loaded {len(cache)} cache entries for {self.original_name}")
-                return cache
-        except (FileNotFoundError, pickle.PickleError, OSError):
-            logging.debug(f"Cache file not found or corrupted for {self.original_name}, starting fresh")
-            return {}
-
-    def _save_cache_safely(self, cache):
-        """Save cache with file locking and atomic write for multiprocessing safety."""
-        try:
-            # Use atomic write pattern: write to temp file, then rename
-            temp_file = self.cache_filename + ".tmp"
-            with open(temp_file, "wb") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
-                pickle.dump(cache, f)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
-            
-            # Atomic rename ensures other processes don't see partial writes
-            os.rename(temp_file, self.cache_filename)
-            self._update_cache_mtime()  # Update our tracking after successful save
-            logging.debug(f"Saved {len(cache)} cache entries for {self.original_name}")
-            
-        except Exception as e:
-            logging.error(f"Failed to save cache for {self.original_name}: {e}")
-            # Clean up temp file if it exists
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except:
-                pass
 
     def _log_stream_progress(self, chunk_count, start_time, log_accumulator, final_log=False):
         """Helper method to log stream progress efficiently."""
@@ -170,43 +107,29 @@ class LLM:
         if type(conversation) == str:
             conversation = [conversation]
 
-        # Create comprehensive cache key including all parameters that affect response
-        cache_key_components = [tuple(conversation)]
-        
-        if add_image is not None:
-            cache_key_components.append(add_image.tobytes())
+        # Check cache if enabled
+        if self.use_cache and not skip_cache and self.cache:
+            # Generate cache key with all parameters that affect response
+            hparams = self.model.hparams if hasattr(self.model, 'hparams') else None
+            cache_key = self.cache.get_cache_key(
+                conversation, 
+                max_tokens=max_tokens, 
+                json=json, 
+                add_image=add_image,
+                hparams=hparams
+            )
             
-        if max_tokens is not None:
-            cache_key_components.append(('max_tokens', max_tokens))
-            
-        if json:
-            cache_key_components.append(('json_mode', True))
-            
-        # Include model hyperparameters that affect response
-        if hasattr(self.model, 'hparams') and self.model.hparams:
-            hparams_tuple = tuple(sorted(self.model.hparams.items()))
-            cache_key_components.append(('hparams', hparams_tuple))
-            
-        cache_key = tuple(cache_key_components)
-
-        # Intelligently reload cache only when file has been modified by other processes
-        if self.use_cache and not skip_cache and self._should_reload_cache():
-            self.cache = self._load_cache_safely()
-            self._update_cache_mtime()
-            
-        if cache_key in self.cache and not skip_cache and self.use_cache:
-            logging.info(f"{self.name} GETCACHE")
-            if len(self.cache[cache_key]) > 0:
-                return self.cache[cache_key]
-            else:
-                logging.info("Empty cache hit")
+            # Try cache lookup
+            cached_response = self.cache.get(cache_key)
+            if cached_response:
+                return cached_response
 
         log_prompt_snippet = repr(conversation[0])[:200] + ("..." if len(conversation[0]) > 200 else "")
         logging.info(f"{self.name} CACHE MISS. Prompt starts: {log_prompt_snippet}")
 
         response = "Model API request failed"
 
-        def process_request_and_stream(json_arg, overall_timeout=300):
+        def process_request_and_stream(json_arg, overall_timeout=900):
             stream = None
             full_response_content = ""
             log_accumulator = "" # Accumulator for logging
@@ -214,7 +137,7 @@ class LLM:
             chunk_count = 0
             start_time = time.monotonic()
             last_chunk_time = start_time
-            chunk_timeout = 30  # Max time between chunks before considering stream dead
+            chunk_timeout = 900  # Max time between chunks before considering stream dead (15 minutes for slow models)
             
             try:
                 stream = self.model.make_request(
@@ -236,7 +159,11 @@ class LLM:
                 except Exception as conn_e:
                     logging.debug(f"CONN_MONITOR: Could not check connections: {conn_e}")
 
+                received_chunks = 0
+                content_chunks = 0
+                
                 for chunk in stream:
+                    received_chunks += 1
                     current_time = time.monotonic()
                     
                     # Check overall timeout
@@ -255,6 +182,7 @@ class LLM:
                         full_response_content += content_part
                         log_accumulator += content_part # Add to accumulator
                         chunk_count += 1
+                        content_chunks += 1
                         last_chunk_time = current_time  # Update last chunk time
 
                         # Log progress periodically (reduced frequency for performance)
@@ -280,6 +208,9 @@ class LLM:
                 except Exception as conn_e:
                     logging.debug(f"CONN_MONITOR: Could not check connections after completion: {conn_e}")
                 
+                if not full_response_content.strip():
+                    logging.warning(f"Stream completed for {self.name} but produced empty response. Received {received_chunks} chunks, {content_chunks} with content")
+                
                 return full_response_content
 
             except TimeoutError:
@@ -293,8 +224,13 @@ class LLM:
                 except Exception:
                     pass
                     
-                raise
+                return ""  # Return empty string instead of raising, to trigger empty response logging
             except Exception as e:
+                # Check if this is a network timeout specifically
+                if "ReadTimeout" in str(e) or "timed out" in str(e):
+                    logging.warning(f"Network timeout for {self.name}: {e}")
+                    return ""  # Return empty string to trigger empty response logging
+                
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
                 
                 # Log connection state on error
@@ -304,8 +240,8 @@ class LLM:
                     logging.error(f"CONN_MONITOR: {len(connections)} active connections during ERROR")
                 except Exception:
                     pass
-                    
-                raise
+                
+                return ""  # Return empty string instead of raising, to trigger empty response logging
             finally:
                 # Ensure stream is properly closed to prevent connection leaks
                 if stream and hasattr(stream, 'close'):
@@ -344,10 +280,18 @@ class LLM:
                 logging.info(f"Request failed on attempt {i+1}. Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
 
-        if self.use_cache and "Model API request failed" not in response:
-            # Update local cache and save to disk atomically
-            self.cache[cache_key] = response
-            self._save_cache_safely(self.cache)
+        # Save successful response to cache
+        if self.use_cache and self.cache and "Model API request failed" not in response:
+            # Regenerate cache key (same logic as above)
+            hparams = self.model.hparams if hasattr(self.model, 'hparams') else None
+            cache_key = self.cache.get_cache_key(
+                conversation, 
+                max_tokens=max_tokens, 
+                json=json, 
+                add_image=add_image,
+                hparams=hparams
+            )
+            self.cache.put(cache_key, response)
 
         return response
 

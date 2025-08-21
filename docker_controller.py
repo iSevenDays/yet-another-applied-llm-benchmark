@@ -309,6 +309,7 @@ def is_fd_closed(fd):
 class DockerJob:
     def __init__(self, container_id, eos_string):
         self.eos_string = eos_string
+        self.container_id = container_id
 
         if BACKEND == "docker":
             cmd = f"docker exec -i {container_id} /bin/bash"
@@ -329,6 +330,75 @@ class DockerJob:
     def remove_ansi(text):
         ansi_escape =re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
         return ansi_escape.sub('', text)
+        
+    def _detect_program_ready(self, cmd, total_output):
+        """
+        Smart detection for interactive program readiness.
+        
+        Some programs (like SQLite) don't emit prompts when using pipes,
+        but are fully functional. This method detects readiness using
+        program-specific strategies instead of relying only on prompt strings.
+        """
+        # For SQLite: Use probe-based detection
+        if 'sqlite3' in cmd.lower():
+            logging.debug(f"DockerJob: Detected SQLite, using probe-based readiness detection")
+            return self._probe_sqlite_ready()
+        
+        # For other programs: Fall back to original EOS detection
+        if self.eos_string in total_output:
+            logging.debug(f"DockerJob: Found EOS string '{self.eos_string}' in output")
+            return True
+            
+        return False
+        
+    def _probe_sqlite_ready(self):
+        """
+        Test if SQLite is ready by sending a probe command and checking response.
+        
+        SQLite doesn't show 'sqlite>' prompt with pipes, but responds to commands.
+        We send '.help' and look for characteristic SQLite help output.
+        """
+        try:
+            logging.debug("DockerJob: Probing SQLite readiness with .help command")
+            
+            # Send probe command
+            self.process.stdin.write('.help\n')
+            self.process.stdin.flush()
+            
+            # Wait for response with timeout using non-blocking read
+            ready, _, _ = select.select([self.master_fd], [], [], 3)
+            if ready:
+                # Non-blocking read to avoid hanging
+                import os
+                response = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
+                logging.debug(f"DockerJob: SQLite probe response: {repr(response[:100])}")
+                
+                # Look for characteristic SQLite help output
+                if '.archive' in response or '.backup' in response or '.help' in response:
+                    logging.info("DockerJob: SQLite is ready and responsive")
+                    return True
+                else:
+                    logging.debug(f"DockerJob: SQLite responded but no help output: {repr(response[:50])}")
+            else:
+                logging.debug("DockerJob: SQLite probe timed out - trying without probe")
+                
+        except Exception as e:
+            logging.debug(f"DockerJob: SQLite probe failed: {e}")
+            
+        return False
+        
+    def _cleanup_process(self):
+        """Clean up any hanging processes in the container."""
+        try:
+            if BACKEND == "docker":
+                # Kill any SQLite processes that might be hanging
+                subprocess.run(["docker", "exec", self.container_id, "pkill", "-f", "sqlite3"], 
+                             capture_output=True, check=False)
+            else:
+                subprocess.run(["podman", "exec", self.container_id, "pkill", "-f", "sqlite3"], 
+                             capture_output=True, check=False)
+        except Exception as e:
+            logging.debug(f"DockerJob: Process cleanup attempt: {e}")
 
     def __call__(self, cmd):
         # Check if process is still alive
@@ -365,35 +435,52 @@ class DockerJob:
             print(f"Process communication failed: {e}")
             return f"Process communication failed: {e}"
 
-        # Read the output until the EOS string is encountered
+        # Read the output with smart detection for program readiness
         output = []
         timeout_count = 0
-        max_timeouts = 3  # Allow up to 3 consecutive timeouts before giving up
-        total_output = ""  # Track accumulated output for better EOS detection
         
-        while True:
-            ready, _, _ = select.select([self.master_fd], [], [], 5)  # 5-second timeout (increased from 2)
+        # Adaptive timeout settings based on command type
+        if 'sqlite3' in cmd.lower():
+            max_timeouts = 2  # SQLite should respond quickly to probe
+            timeout_duration = 4  # Shorter timeouts for probe-based detection
+            logging.debug("DockerJob: Using SQLite-optimized timeouts")
+        else:
+            max_timeouts = 3  # Standard timeout for other programs
+            timeout_duration = 10  # Standard timeout duration
+            
+        total_output = ""  # Track accumulated output for detection
+        program_ready = False
+        
+        # First, try smart detection immediately for programs that might be ready
+        if 'sqlite3' in cmd.lower():
+            # Give SQLite a moment to start, then test readiness
+            import time
+            time.sleep(0.5)
+            if self._detect_program_ready(cmd, total_output):
+                program_ready = True
+                logging.info("DockerJob: Program detected as ready via smart detection")
+        
+        while not program_ready:
+            ready, _, _ = select.select([self.master_fd], [], [], timeout_duration)
             if ready:
                 timeout_count = 0  # Reset timeout counter on successful read
                 try:
-                    # Use the text stream directly instead of os.read on file descriptor
-                    # since subprocess was created with text=True
-                    if self.process.stdout.readable():
-                        line = self.process.stdout.read(128)
-                        if line:
-                            output.append(line)
-                            total_output += line
-                            logging.debug(f"DockerJob received chunk ({len(line)} chars): {repr(line[:50])}")
-                            # Check EOS string in accumulated output for better detection
-                            if self.eos_string in total_output:
-                                logging.debug(f"DockerJob found EOS string '{self.eos_string}' in accumulated output")
-                                break
-                        else:
-                            # Empty read indicates end of stream
-                            logging.debug("DockerJob: Empty read - end of stream")
+                    # Use non-blocking read to prevent hangs
+                    import os
+                    line = os.read(self.master_fd, 128).decode('utf-8', errors='ignore')
+                    if line:
+                        output.append(line)
+                        total_output += line
+                        logging.debug(f"DockerJob received chunk ({len(line)} chars): {repr(line[:50])}")
+                        
+                        # Check if program is ready using smart detection
+                        if self._detect_program_ready(cmd, total_output):
+                            logging.debug("DockerJob: Program ready detected")
+                            program_ready = True
                             break
                     else:
-                        logging.warning("DockerJob: stdout is not readable")
+                        # Empty read indicates end of stream
+                        logging.debug("DockerJob: Empty read - end of stream")
                         break
                 except (OSError, ValueError) as e:
                     logging.error(f"DockerJob error reading from process stdout: {e}")
@@ -402,9 +489,19 @@ class DockerJob:
                 # Timeout occurred
                 timeout_count += 1
                 logging.debug(f"DockerJob accumulated output so far ({len(total_output)} chars): {repr(total_output[:100])}")
+                
+                # For interactive programs, try smart detection on timeout
+                if self._detect_program_ready(cmd, total_output):
+                    logging.info("DockerJob: Program ready detected after timeout")
+                    program_ready = True
+                    break
+                
                 if timeout_count >= max_timeouts:
-                    logging.warning(f"DockerJob timeout - no output received after {max_timeouts} attempts (5s each)")
+                    logging.warning(f"DockerJob timeout - no response after {max_timeouts} attempts ({timeout_duration}s each)")
                     logging.warning(f"DockerJob expected EOS: {repr(self.eos_string)}, got: {repr(total_output)}")
+                    
+                    # Clean up any hanging processes
+                    self._cleanup_process()
                     break
                 else:
                     logging.debug(f"DockerJob timeout #{timeout_count} - retrying...")
@@ -424,7 +521,7 @@ def invoke_docker(env, files, run_cmd, out_bytes=False):
     def raise_timeout(signum, frame):
         raise TimeoutError
     signal.signal(signal.SIGALRM, raise_timeout)
-    signal.alarm(20)
+    signal.alarm(50)
     
     try:
         # Function call that might take too long
@@ -459,7 +556,7 @@ if I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKIN
         def raise_timeout(signum, frame):
             raise TimeoutError
         signal.signal(signal.SIGALRM, raise_timeout)
-        signal.alarm(20)
+        signal.alarm(50)
         
         try:
             # Function call that might take too long

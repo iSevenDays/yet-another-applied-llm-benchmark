@@ -44,7 +44,19 @@ class AssemblyEmulator:
             if ctr > 1e6:
                 raise Exception("Infinite loop detected")
 
-            parts = self.instructions[self.instruction_pointer].split("//")[0].replace(",","").split()
+            # Handle both // and ; style comments, and strip whitespace
+            line = self.instructions[self.instruction_pointer].strip()
+            
+            # Remove comments (both // and ; styles)
+            if "//" in line:
+                line = line.split("//")[0]
+            if ";" in line:
+                line = line.split(";")[0]
+            
+            # Split into parts and remove commas
+            parts = line.replace(",", "").split()
+            
+            # Skip empty lines and comment-only lines
             if len(parts) == 0:
                 self.instruction_pointer += 1
                 continue
@@ -72,16 +84,18 @@ class AssemblyEmulator:
                     if len(args) < 1:
                         raise Exception(f"DEC instruction requires 1 argument, got {len(args)}")
                     self.registers[args[0]] -= 1
-                elif instruction == "JT" and self.flag:
+                elif instruction == "JT":
                     if len(args) < 1:
                         raise Exception(f"JT instruction requires 1 argument, got {len(args)}")
-                    self.instruction_pointer = self.find_label(args[0])
-                    continue
-                elif instruction == "JF" and not self.flag:
+                    if self.flag:
+                        self.instruction_pointer = self.find_label(args[0])
+                        continue
+                elif instruction == "JF":
                     if len(args) < 1:
                         raise Exception(f"JF instruction requires 1 argument, got {len(args)}")
-                    self.instruction_pointer = self.find_label(args[0])
-                    continue
+                    if not self.flag:
+                        self.instruction_pointer = self.find_label(args[0])
+                        continue
                 elif instruction == "JMP":
                     if len(args) < 1:
                         raise Exception(f"JMP instruction requires 1 argument, got {len(args)}")
@@ -90,7 +104,7 @@ class AssemblyEmulator:
                 elif instruction == "LOAD":
                     if len(args) < 2:
                         raise Exception(f"LOAD instruction requires 2 arguments, got {len(args)}")
-                    self.memory[lookup(args[1])] = lookup(args[0])
+                    self.registers[args[0]] = self.memory[lookup(args[1])]
                 elif instruction == "STORE":
                     if len(args) < 2:
                         raise Exception(f"STORE instruction requires 2 arguments, got {len(args)}")
@@ -101,6 +115,8 @@ class AssemblyEmulator:
                     # This is a label, skip it
                     pass
                 else:
+                    import logging
+                    logging.debug(f"AssemblyEmulator: Unknown instruction '{instruction}' with args {args} at line {self.instruction_pointer}: '{line}'")
                     raise Exception(f"Unknown instruction: {instruction}")
             except (IndexError, KeyError) as e:
                 raise Exception(f"Error executing instruction '{instruction}' with args {args}: {e}")

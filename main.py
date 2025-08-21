@@ -182,10 +182,30 @@ def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, 
     sr[f"{filename}.{test_name}"] = (test_passed, failure_reason)
     return test_passed
 
+class ConciseFormatter(logging.Formatter):
+    """Custom formatter for abbreviated log levels."""
+    level_map = {
+        'WARNING': 'WARN',
+        'CRITICAL': 'CRIT',
+        'ERROR': 'ERR',
+        'INFO': 'INFO',
+        'DEBUG': 'DBUG'
+    }
+    
+    def format(self, record):
+        # Abbreviate level name
+        original_levelname = record.levelname
+        record.levelname = self.level_map.get(original_levelname, original_levelname)
+        result = super().format(record)
+        # Restore original level name
+        record.levelname = original_levelname
+        return result
+
 def _setup_worker_logging():
     """Configure efficient logging for worker processes following SPARC principles."""
     import threading
     import sys
+    import time
     
     logger = logging.getLogger()
     logger.handlers.clear()
@@ -197,10 +217,13 @@ def _setup_worker_logging():
         
         # Only create file handler if DEBUG level is explicitly needed
         if os.environ.get('BENCHMARK_DEBUG_WORKERS') == '1':
-            worker_log_file = f'debug_stream_worker_{os.getpid()}.log'
+            # Generate timestamp-based filename
+            timestamp = time.strftime('%Y-%m-%d-%H-%M-%S')
+            worker_log_file = f'logs/debug_stream_worker_{timestamp}.log'
             file_handler = logging.FileHandler(worker_log_file, mode='a')
             file_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKER - [%(funcName)s] %(message)s')
+            # Concise format: shortened timestamp, abbreviated level, abbreviated function name
+            formatter = ConciseFormatter('%(asctime)s,%(msecs)01d - %(levelname)s - [%(funcName)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
             worker_log_level = logging.DEBUG
@@ -208,7 +231,7 @@ def _setup_worker_logging():
             # SPARC: Focus on essential logging only - use stderr for critical worker issues
             console_handler = logging.StreamHandler(sys.stderr)
             console_handler.setLevel(logging.WARNING)
-            formatter = logging.Formatter('WORKER-%(levelname)s: %(message)s')
+            formatter = ConciseFormatter('WORKER-%(levelname)s: %(message)s')
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
         
@@ -620,6 +643,38 @@ def get_tags():
                 descriptions[f+"."+t] = module.DESCRIPTION
     return tags, descriptions
 
+def discover_available_models(logdir):
+    """
+    Discover all available models from saved runs across all commits.
+    
+    Args:
+        logdir: Directory containing saved runs organized by commit hash
+        
+    Returns:
+        List of unique model names found across all commits, sorted alphabetically
+    """
+    import re
+    all_models = set()
+    
+    try:
+        commit_hashes = get_ordered_logs(logdir)
+        
+        for commit_hash in commit_hashes:
+            commit_dir = os.path.join(logdir, commit_hash)
+            if os.path.exists(commit_dir):
+                for filename in os.listdir(commit_dir):
+                    # Extract model name from filename pattern: {model_name}-run{N}.p
+                    match = re.match(r"^(.+)-run\d+\.p$", filename)
+                    if match:
+                        model_name = match.group(1)
+                        all_models.add(model_name)
+                        
+    except Exception as e:
+        logging.warning(f"Error discovering models: {e}")
+        return []
+    
+    return sorted(list(all_models))
+
 def get_ordered_logs(logdir):
     hashes = []
     for githash in os.listdir(logdir):
@@ -659,24 +714,32 @@ def load_saved_runs(output_dir, model):
 
 def _setup_main_logging():
     """Configure efficient main process logging following SPARC principles."""
-    log_filename = 'debug_stream.log'
+    import time
+    
+    # Generate timestamp-based filename
+    timestamp = time.strftime('%Y-%m-%d-%H-%M-%S')
+    log_filename = f'logs/debug_stream_main_{timestamp}.log'
     
     # SPARC: Simple configuration with performance-conscious defaults
     console_level = logging.INFO  # Reduce console noise
     file_level = logging.DEBUG if os.environ.get('BENCHMARK_VERBOSE_LOGS') == '1' else logging.INFO
     
+    # Create handlers with custom formatter
+    file_handler = logging.FileHandler(log_filename, mode='a')
+    console_handler = logging.StreamHandler(sys.stdout)
+    
+    # Apply concise formatter
+    formatter = ConciseFormatter('%(asctime)s,%(msecs)01d - %(levelname)s - [%(funcName)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Configure logging
     logging.basicConfig(
         level=file_level,
-        format='%(asctime)s - %(levelname)s - %(name)s - [%(funcName)s] %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename, mode='a'),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=[file_handler, console_handler]
     )
     # Set console handler to reduced level for cleaner output
-    handlers = logging.getLogger().handlers
-    if len(handlers) > 1:
-        handlers[1].setLevel(console_level)
+    console_handler.setLevel(console_level)
     
     # Only log initialization if verbose mode is enabled
     if file_level == logging.DEBUG:
@@ -690,6 +753,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run tests on language models.")
     parser.add_argument('--model', help='Specify a specific model to run.', type=str, action="append")
     parser.add_argument('--all-models', help='Run all models.', action='store_true')
+    parser.add_argument('--add-all', help='Auto-discover and load all previously saved models.', action='store_true')
+    parser.add_argument('--add', help='Load all previously saved models plus specified models.', action='store_true')
     
     parser.add_argument('--test', help='Specify a specific test to run.', type=str, action="append")
     
@@ -706,15 +771,42 @@ def main():
 
     assert args.run_tests ^ args.load_saved, "Exactly one of --run-tests or --load-saved must be specified."
     
-    if args.all_models and args.model:
-        parser.error("The arguments --all-models and --model cannot be used together.")
+    # Validate model selection arguments - following SPARC principle of clear validation
+    # Note: --add can be combined with --model, but others are mutually exclusive
+    exclusive_args = [args.all_models, args.add_all]
+    if args.add:
+        # --add can work with --model, but not with other flags
+        if any(exclusive_args):
+            parser.error("Cannot combine --add with --all-models or --add-all.")
+    else:
+        # Without --add, check for mutual exclusivity
+        model_selection_args = exclusive_args + [bool(args.model)]
+        if sum(model_selection_args) > 1:
+            parser.error("Cannot combine --all-models, --add-all, and --model. Choose one approach.")
+    
+    # Validate that --add and --add-all require --load-saved
+    if (args.add or args.add_all) and not args.load_saved:
+        parser.error("--add and --add-all can only be used with --load-saved.")
     
     # Create the results directory if it doesn't exist
     if not os.path.exists(args.logdir):
         os.makedirs(args.logdir)
 
+    # Model selection logic - enhanced following SPARC iteration principle
     models_to_run = []
-    if args.model:
+    if args.add_all:
+        models_to_run = discover_available_models(args.logdir)
+        print(f"Auto-discovered {len(models_to_run)} models: {', '.join(models_to_run)}")
+    elif args.add:
+        discovered = discover_available_models(args.logdir)
+        specified = args.model or []
+        models_to_run = sorted(list(set(discovered + specified)))
+        print(f"Loading {len(discovered)} discovered + {len(specified)} specified models")
+        if discovered:
+            print(f"  Discovered: {', '.join(discovered)}")
+        if specified:
+            print(f"  Specified: {', '.join(specified)}")
+    elif args.model:
         models_to_run = args.model
     elif args.all_models:
         models_to_run = DEFAULT_MODELS

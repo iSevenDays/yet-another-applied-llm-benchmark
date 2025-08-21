@@ -39,8 +39,17 @@ import re
 def sanitize_filename(filename):
     # Split on colon if it exists to preserve the #tab1 anchor
     name, *rest = filename.split('#', 1)
-    # Replace invalid characters with underscores
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name)
+    
+    # Split path and filename to preserve directory structure
+    if '/' in name:
+        path_parts = name.split('/')
+        # Sanitize only the filename part, preserve directory separators
+        path_parts[-1] = re.sub(r'[<>:"|?*]', '_', path_parts[-1])
+        sanitized = '/'.join(path_parts)
+    else:
+        # No directory separator, sanitize the whole thing but preserve forward slashes
+        sanitized = re.sub(r'[<>:"|?*]', '_', name)
+    
     # Add back the anchor if it existed
     if rest:
         sanitized = sanitized + '#' + rest[0]
@@ -135,27 +144,68 @@ def generate_report(data, tags, descriptions):
     #all_tests = sorted({key for inner_dict in data.values() for key in inner_dict.keys()})
     all_tests = [inner_dict.keys() for inner_dict in data.values()]
 
-    print(all_tests)
+    print(f"Models with test data: {len([tests for tests in all_tests if len(tests) > 0])}")
+    print(f"Models with empty test data: {len([tests for tests in all_tests if len(tests) == 0])}")
     
-    # keep only the tests that are in all models
-    union_tests = set.union(*map(set, all_tests))
-    all_tests = set.intersection(*map(set, all_tests))
+    # Filter out models with no test data before computing intersection
+    non_empty_tests = [tests for tests in all_tests if len(tests) > 0]
+    
+    if len(non_empty_tests) == 0:
+        raise ValueError("No models have any test data")
+    
+    # Use a threshold approach instead of requiring all models to have the same tests
+    union_tests = set.union(*map(set, non_empty_tests))
+    intersection_tests = set.intersection(*map(set, non_empty_tests))
 
-    print("Skipping", union_tests - all_tests)
+    print(f"Union of tests across {len(non_empty_tests)} models: {len(union_tests)}")
+    print(f"Intersection of tests across {len(non_empty_tests)} models: {len(intersection_tests)}")
     
-    all_tests = sorted(all_tests)
+    if len(intersection_tests) == 0:
+        # Count how many models each test appears in
+        test_counts = {}
+        for model_tests in non_empty_tests:
+            for test in model_tests:
+                test_counts[test] = test_counts.get(test, 0) + 1
+        
+        # Use tests that appear in at least 75% of models, minimum 2 models
+        min_models_required = max(2, int(len(non_empty_tests) * 0.75))
+        all_tests = sorted([test for test, count in test_counts.items() 
+                           if count >= min_models_required])
+        
+        print(f"No intersection found. Using {len(all_tests)} tests present in at least {min_models_required} models (75% threshold)")
+        skipped_tests = union_tests - set(all_tests)
+        print(f"Skipping {len(skipped_tests)} tests with insufficient coverage")
+        
+    else:
+        all_tests = sorted(intersection_tests)
+        skipped_tests = union_tests - intersection_tests
+        print(f"Using intersection: {len(all_tests)} tests")
+        print("Skipping", skipped_tests)
 
     #all_tests = ["draw_flag_bmp.py.TestEasyFlagDraw"]
 
     if len(all_tests) == 0:
-        raise ValueError("No tests in common between models")
+        # Fallback to 50% threshold if 75% produces no results
+        min_models_required = max(1, len(non_empty_tests) // 2)
+        all_tests = sorted([test for test, count in test_counts.items() 
+                           if count >= min_models_required])
+        print(f"Fallback: Using {len(all_tests)} tests present in at least {min_models_required} models (50% threshold)")
+        
+        if len(all_tests) == 0:
+            raise ValueError(f"No tests found with sufficient coverage across {len(non_empty_tests)} models")
     
     all_models = []
     score_table = []
     
     for model_name, inner_dict in data.items():
         all_models.append(model_name)
-        score_table.append([np.mean(inner_dict[k]) for k in all_tests])
+        scores = []
+        for test in all_tests:
+            if test in inner_dict:
+                scores.append(np.mean(inner_dict[test]))
+            else:
+                scores.append(np.nan)  # Use NaN for missing data
+        score_table.append(scores)
 
     score_table = np.array(score_table)
 
