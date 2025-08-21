@@ -11,7 +11,26 @@ import os
 import pickle
 import fcntl
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any, Union
+
+
+def make_hashable(obj: Any) -> Any:
+    """
+    Recursively convert nested data structures to hashable forms.
+    Following SPARC simplicity: minimal, focused solution for cache key generation.
+    """
+    if isinstance(obj, dict):
+        # Convert dict to sorted tuple of (key, value) pairs
+        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+    elif isinstance(obj, list):
+        # Convert list to tuple
+        return tuple(make_hashable(item) for item in obj)
+    elif isinstance(obj, set):
+        # Convert set to sorted tuple
+        return tuple(sorted(make_hashable(item) for item in obj))
+    else:
+        # Primitive types (str, int, float, bool, None) are already hashable
+        return obj
 
 
 class LLMCache:
@@ -20,11 +39,12 @@ class LLMCache:
     def __init__(self, model_name: str, cache_dir: str = "tmp"):
         """Initialize cache with model-specific storage."""
         self.model_name = model_name
-        self.cache_dir = cache_dir
+        # Ensure cache_dir is absolute to handle multiprocessing working directory issues
+        self.cache_dir = os.path.abspath(cache_dir)
         
         # Create safe filename from model name
         safe_name = model_name.replace('/', '_').replace(':', '_')
-        self.cache_file = os.path.join(cache_dir, f"cache-{safe_name}.p")
+        self.cache_file = os.path.join(self.cache_dir, f"cache-{safe_name}.p")
         
         # Internal state
         self._cache: Dict[Tuple, str] = {}
@@ -67,8 +87,9 @@ class LLMCache:
         
         # Only add hparams component if we have parameters
         if normalized_hparams:
-            hparams_tuple = tuple(sorted(normalized_hparams.items()))
-            key_parts.append(('hparams', hparams_tuple))
+            # Convert to hashable form to handle nested dicts/lists (e.g., thinking budget config)
+            hashable_hparams = make_hashable(normalized_hparams)
+            key_parts.append(('hparams', hashable_hparams))
         
         cache_key = tuple(key_parts)
         
@@ -142,8 +163,18 @@ class LLMCache:
         logging.debug(f"Cached response for {self.model_name} ({len(response)} chars)")
     
     def _ensure_cache_dir(self):
-        """Create cache directory if it doesn't exist."""
-        os.makedirs(self.cache_dir, exist_ok=True)
+        """Create cache directory if it doesn't exist, handling race conditions."""
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            # Double-check directory was created successfully
+            if not os.path.exists(self.cache_dir):
+                raise OSError(f"Failed to create cache directory: {self.cache_dir}")
+        except OSError as e:
+            # Log directory creation issues for debugging
+            logging.error(f"Cache directory creation failed for {self.model_name}: {e}")
+            logging.error(f"Attempted directory: {self.cache_dir}")
+            logging.error(f"Current working directory: {os.getcwd()}")
+            raise
     
     def _load_cache(self):
         """Load cache from disk with error handling."""
@@ -166,9 +197,14 @@ class LLMCache:
     
     def _save_cache(self):
         """Save cache to disk atomically with file locking."""
+        temp_file = None
         try:
             # Ensure cache directory exists (handles multiprocessing race conditions)
             self._ensure_cache_dir()
+            
+            # Verify cache directory exists before proceeding
+            if not os.path.exists(self.cache_dir):
+                raise OSError(f"Cache directory {self.cache_dir} does not exist after creation attempt")
             
             # Atomic write: write to temp file then rename
             temp_file = self.cache_file + ".tmp"
@@ -183,11 +219,17 @@ class LLMCache:
             
         except Exception as e:
             logging.error(f"Cache save failed for {self.model_name}: {e}")
+            logging.error(f"Cache directory: {self.cache_dir} (exists: {os.path.exists(self.cache_dir)})")
+            logging.error(f"Cache file: {self.cache_file}")
+            if temp_file:
+                logging.error(f"Temp file: {temp_file} (exists: {os.path.exists(temp_file)})")
+            
             # Clean up temp file if it exists
             try:
-                if os.path.exists(temp_file):
+                if temp_file and os.path.exists(temp_file):
                     os.remove(temp_file)
-            except:
+            except OSError:
+                # Ignore file system errors during cleanup
                 pass
     
     def _reload_if_changed(self):

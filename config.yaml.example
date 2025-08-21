@@ -1,0 +1,96 @@
+# Yet Another Applied LLM Benchmark - Configuration Template
+# Copy this file to config.yaml and update with your settings
+
+# Container backend: "docker" or "podman"
+# Podman provides enhanced security with rootless containers
+container: podman
+
+# Optional system prompt applied to all models
+# Leave empty for default model behavior
+system_prompt: ""
+
+# Global hyperparameters applied to all models
+# Individual providers can override these settings
+hparams:
+  temperature: 0.7        # Sampling temperature (0.0 = deterministic, 1.0 = creative)
+  max_tokens: 4096        # Maximum tokens per response
+  # top_p: 0.9            # Nucleus sampling parameter
+  # top_k: 50             # Top-k sampling parameter
+
+# Model provider configurations
+llms:
+  # Google Vertex AI (requires GCP project)
+  vertexai:
+    project_id: "your-gcp-project-id"
+    # Optional: specify region
+    # region: "us-central1"
+
+  # OpenAI API (official or compatible endpoints)
+  openai:
+    api_key: "sk-your-openai-api-key"
+    # api_base: "https://api.openai.com/v1"  # Default, can be omitted
+    # Optional provider-specific overrides
+    # hparams:
+    #   temperature: 0.0  # Override global temperature for OpenAI only
+
+  # OpenAI-compatible local server (e.g., vLLM, text-generation-inference)
+  openai_local:
+    api_key: "dummy-key-for-local-server"
+    api_base: "http://localhost:8000/v1"
+    hparams:
+      # Example: Thinking model configuration
+      extra_body:
+        chat_template_kwargs:
+          thinking_budget: 15000  # Tokens allocated for internal reasoning
+
+  # Anthropic Claude
+  anthropic:
+    api_key: "sk-ant-your-anthropic-key"
+    # Optional provider overrides
+    # hparams:
+    #   max_tokens: 8192  # Claude supports longer responses
+
+  # Mistral AI
+  mistral:
+    api_key: "your-mistral-api-key"
+
+  # Cohere
+  cohere:
+    api_key: "your-cohere-api-key"
+
+  # Groq (fast inference)
+  groq:
+    api_key: "gsk-your-groq-api-key"
+
+  # Moonshot AI
+  moonshot:
+    api_key: "your-moonshot-api-key"
+
+  # Local Ollama instance
+  ollama:
+    api_base: "http://localhost:11434"
+    # Optional: system prompt override for Ollama specifically
+    # system_prompt: "You are a helpful coding assistant."
+
+# Example configurations for common setups:
+
+# Local development with Ollama:
+# llms:
+#   ollama:
+#     api_base: "http://localhost:11434"
+
+# Cloud-only setup:
+# llms:
+#   openai:
+#     api_key: "sk-..."
+#   anthropic:
+#     api_key: "sk-ant-..."
+
+# Mixed local + cloud setup:
+# llms:
+#   openai:
+#     api_key: "sk-..."
+#   ollama:
+#     api_base: "http://localhost:11434"
+#   anthropic:
+#     api_key: "sk-ant-..."

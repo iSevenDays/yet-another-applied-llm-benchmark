@@ -139,6 +139,7 @@ class LLM:
             last_chunk_time = start_time
             chunk_timeout = 900  # Max time between chunks before considering stream dead (15 minutes for slow models)
             
+            stream = None  # Initialize to prevent UnboundLocalError in finally block
             try:
                 stream = self.model.make_request(
                     conversation,
@@ -303,7 +304,7 @@ class LLM:
 #llm = LLM("gemini-1.5-pro-preview-0409")
 llm = LLM("o1-mini")
 
-eval_llm = LLM("openai_eval_qwen2.5-coder:latest")
+eval_llm = LLM("openai_eval_qwen/qwen3-30b-a3b")
 #eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
 
 # Set to None to skip vision tests, or configure a vision-capable model

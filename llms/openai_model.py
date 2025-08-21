@@ -5,13 +5,14 @@ import os  # Import the os module
 
 from openai import OpenAI
 import json
+from config_loader import load_config
 
 class OpenAIModel:
     def __init__(self, name, config_key='openai'):
-        config = json.load(open("config.json"))
+        config = load_config()
         api_key = config['llms'][config_key]['api_key'].strip()
         
-        # Prioritize environment variable, fallback to config.json
+        # Prioritize environment variable, fallback to config.yaml
         api_base = os.getenv('OPENAI_BASE_URL') or config['llms'][config_key]['api_base']
         
         # Configure client with connection limits to prevent leaks and hanging
@@ -53,6 +54,9 @@ class OpenAIModel:
         }
         kwargs.update(self.hparams)
     
+        # Extract extra_body parameter before cleaning - OpenAI client needs it separate
+        extra_body = kwargs.pop('extra_body', None)
+    
         for k,v in list(kwargs.items()):
             if v is None:
                 del kwargs[k]
@@ -63,15 +67,24 @@ class OpenAIModel:
 
         # Log non-message kwargs for debugging, exclude potentially large messages
         debug_kwargs = {k: v for k, v in kwargs.items() if k != 'messages'}
+        if extra_body:
+            debug_kwargs['extra_body'] = extra_body
         import logging
         logging.debug(f"OpenAI request to {self.client.base_url} model={self.name}, stream={stream}, kwargs={debug_kwargs}")
 
-        # Pass stream=True to the API call
-        stream_response = self.client.chat.completions.create(
-            model=self.name,
-            stream=stream, # Pass the stream flag
+        # Prepare API call parameters
+        api_kwargs = {
+            "model": self.name,
+            "stream": stream,
             **kwargs
-        )
+        }
+        
+        # Add extra_body if present (for thinking models and custom API servers)
+        if extra_body is not None:
+            api_kwargs["extra_body"] = extra_body
+
+        # Pass stream=True to the API call
+        stream_response = self.client.chat.completions.create(**api_kwargs)
 
         # Return the stream object if stream=True, otherwise process and return string
         if stream:

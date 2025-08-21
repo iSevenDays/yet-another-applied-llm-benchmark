@@ -4,15 +4,15 @@ from io import BytesIO
 import base64
 from PIL import Image
 import os
+from config_loader import load_config
 class OllamaModel:
     def __init__(self, name):
-        with open("config.json") as f:
-            config = json.load(f)
+        config = load_config()
         self.name = name
         
-        # Fix system prompt handling
+        # System prompt handling - no fallback, only use if explicitly set
         ollama_config = config['llms'].get('ollama', {})
-        self.system = ollama_config.get('system_prompt', "You are a helpful assistant.")
+        self.system = ollama_config.get('system_prompt', "")
         
         # Fix hparams handling - start with global, then overlay ollama-specific
         self.hparams = config.get('hparams', {}).copy()
@@ -24,7 +24,11 @@ class OllamaModel:
                        "http://localhost:11434"  # Default Ollama API endpoint
 
     def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
-        messages = [{"role": "system", "content": self.system}] + [{"role": "user" if i % 2 == 0 else "assistant", "content": content} for i, content in enumerate(conversation)]
+        # Only add system message if system prompt is not empty
+        messages = []
+        if self.system.strip():  # Skip if empty or whitespace-only
+            messages.append({"role": "system", "content": self.system})
+        messages.extend([{"role": "user" if i % 2 == 0 else "assistant", "content": content} for i, content in enumerate(conversation)])
 
         if add_image:
             buffered = BytesIO()

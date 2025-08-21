@@ -1,10 +1,10 @@
 import json
 import requests
+from config_loader import load_config
 
 class LlamaCpp:
     def __init__(self):
-        with open("config.json") as f:
-            config = json.load(f)
+        config = load_config()
         self.hparams = config['hparams']
         self.hparams.update(config['llms'].get('llama_cpp', {}).get('hparams', {}))
         self.api_base = "http://192.168.0.18:8080"  # LlamaCpp API endpoint

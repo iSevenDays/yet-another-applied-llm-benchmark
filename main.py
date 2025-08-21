@@ -261,8 +261,37 @@ def format_failure_reason(failure_reason, max_length=MAX_FAILURE_REASON_LENGTH):
         # If this is an evaluator node, check if it failed
         if 'Evaluator' in node_name and len(reason.children) >= 2:
             expected, result = reason.children[0], reason.children[1]
+            actual_output = reason.children[2] if len(reason.children) >= 3 else "(output not captured)"
+            
             if result is False:  # This evaluator failed
-                return f"{node_name}: Expected '{expected}' but test failed"
+                # Truncate actual output for readability
+                if isinstance(actual_output, str) and len(actual_output) > 100:
+                    actual_truncated = actual_output[:97] + "..."
+                else:
+                    actual_truncated = str(actual_output)
+                
+                return f"{node_name}: Expected '{expected}', got '{actual_truncated}'"
+        
+        # For ThenNode, provide details about which step failed
+        if node_name == 'ThenNode' and isinstance(reason.children, (list, tuple)) and len(reason.children) >= 2:
+            step1_reason, step2_reason = reason.children[0], reason.children[1]
+            if hasattr(step1_reason, 'node') and hasattr(step2_reason, 'node'):
+                step1_name = step1_reason.node.__name__ if hasattr(step1_reason.node, '__name__') else str(step1_reason.node)
+                step2_name = step2_reason.node.__name__ if hasattr(step2_reason.node, '__name__') else str(step2_reason.node)
+                
+                # Check for actual error details in the reasons
+                error_detail = ""
+                for step_name, step_reason in [(step1_name, step1_reason), (step2_name, step2_reason)]:
+                    if hasattr(step_reason, 'children') and step_reason.children:
+                        # Look for error strings in the children
+                        for child in (step_reason.children if isinstance(step_reason.children, (list, tuple)) else [step_reason.children]):
+                            if isinstance(child, str) and ("error" in child.lower() or "exception" in child.lower() or "failed" in child.lower()):
+                                error_detail = f" ({step_name}: {child[:50]}{'...' if len(child) > 50 else ''})"
+                                break
+                        if error_detail:
+                            break
+                
+                return f"ThenNode: {step1_name} -> {step2_name} pipeline failed{error_detail}"
         
         # Recursively search children for evaluator failures
         if isinstance(reason.children, (list, tuple)):
@@ -280,7 +309,24 @@ def format_failure_reason(failure_reason, max_length=MAX_FAILURE_REASON_LENGTH):
             reason_str = evaluator_failure
         else:
             node_name = failure_reason.node.__name__ if hasattr(failure_reason.node, '__name__') else str(failure_reason.node)
-            reason_str = f"Test failed at {node_name} step"
+            
+            # For ThenNode failures, try to extract more context
+            if node_name == 'ThenNode' and hasattr(failure_reason, 'children'):
+                children_info = []
+                if isinstance(failure_reason.children, (list, tuple)):
+                    for i, child in enumerate(failure_reason.children):
+                        if hasattr(child, 'node'):
+                            child_name = child.node.__name__ if hasattr(child.node, '__name__') else str(child.node)
+                            children_info.append(f"step{i+1}:{child_name}")
+                        else:
+                            children_info.append(f"step{i+1}:unknown")
+                
+                if children_info:
+                    reason_str = f"ThenNode pipeline failed ({' -> '.join(children_info)})"
+                else:
+                    reason_str = f"Test failed at {node_name} step"
+            else:
+                reason_str = f"Test failed at {node_name} step"
     else:
         reason_str = str(failure_reason)
     
@@ -412,7 +458,20 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
             logging.info(f"STAGE: {test_name} stage {stage_count} completed in {stage_duration:.1f}s, success={success}")
             
             if stage_duration > STAGE_HANG_THRESHOLD_SECONDS:
-                logging.warning(f"HANG_DETECT: {test_name} stage {stage_count} took {stage_duration:.1f}s (>{STAGE_HANG_THRESHOLD_SECONDS}s)")
+                # Try to extract which node type is running for better debugging
+                node_context = ""
+                if hasattr(output, 'node'):
+                    node_name = output.node.__name__ if hasattr(output.node, '__name__') else str(output.node)
+                    node_context = f" in {node_name}"
+                elif hasattr(test, '__name__'):
+                    # If we can't get node info, at least show test structure
+                    test_repr = str(test)[:100]
+                    if 'ThenNode' in test_repr:
+                        node_context = f" (ThenNode pipeline)"
+                    elif 'LLMRun' in test_repr:
+                        node_context = f" (LLM execution)"
+                
+                logging.warning(f"HANG_DETECT: {test_name} stage {stage_count} took {stage_duration:.1f}s (>{STAGE_HANG_THRESHOLD_SECONDS}s){node_context}")
             
             last_stage_time = current_time
             
@@ -712,6 +771,28 @@ def load_saved_runs(output_dir, model):
                 print(f"Warning: Invalid JSON in file {file}")
     return saved_runs
 
+def load_model_data_parallel(model, logdir):
+    """
+    Load data for a single model - designed for parallel execution.
+    Following SPARC principles: Simple, focused function with clear purpose.
+    
+    Args:
+        model: Model name to load data for
+        logdir: Directory containing saved runs organized by commit hash
+    
+    Returns:
+        tuple: (model_name, model_data_dict)
+    """
+    model_data = {}
+    commit_hashes = get_ordered_logs(logdir)
+    
+    for githash in commit_hashes[::-1]:
+        kvs = load_saved_runs(os.path.join(logdir, githash), model)
+        for k,v in kvs.items():
+            model_data[k] = v
+    
+    return model, model_data
+
 def _setup_main_logging():
     """Configure efficient main process logging following SPARC principles."""
     import time
@@ -814,15 +895,35 @@ def main():
     data = {}
     for model in models_to_run:
         if args.load_saved:
-            data[model] = {}
-            commit_hashes = get_ordered_logs(args.logdir)
-            print("Loading data from commits")
+            # Parallel data loading optimization - significant speedup for multiple models
+            if len(models_to_run) > 1:
+                print(f"Loading data for {len(models_to_run)} models in parallel...")
+                # Use min to avoid creating too many processes, max 4 workers for optimal I/O balance
+                max_workers = min(len(models_to_run), 4)
+                
+                with mp.Pool(max_workers) as pool:
+                    # Load all models in parallel using starmap for multiple arguments
+                    results = pool.starmap(load_model_data_parallel, 
+                                         [(model, args.logdir) for model in models_to_run])
+                
+                # Populate data dict from parallel results
+                for model, model_data in results:
+                    data[model] = model_data
+                    print(f"Loaded data for {model}")
+                
+                # Skip the rest of the loop since we've processed all models
+                break
+            else:
+                # Single model - use original sequential logic
+                data[model] = {}
+                commit_hashes = get_ordered_logs(args.logdir)
+                print("Loading data from commits")
 
-            for githash in commit_hashes[::-1]:
-                print(githash)
-                kvs = load_saved_runs(os.path.join(args.logdir, githash), model)
-                for k,v in kvs.items():
-                    data[model][k] = v
+                for githash in commit_hashes[::-1]:
+                    print(githash)
+                    kvs = load_saved_runs(os.path.join(args.logdir, githash), model)
+                    for k,v in kvs.items():
+                        data[model][k] = v
         elif args.run_tests:
             tests_subset = None # run all of them
             

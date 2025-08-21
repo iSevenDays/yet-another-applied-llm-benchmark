@@ -4,10 +4,11 @@ import base64
 
 import cohere
 import json
+from config_loader import load_config
 
 class CohereModel:
     def __init__(self, name):
-        config = json.load(open("config.json"))
+        config = load_config()
         api_key = config['llms']['cohere']['api_key'].strip()
         self.client = cohere.Client(api_key)
         self.name = name

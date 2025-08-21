@@ -1,11 +1,12 @@
 import json
 import time
 import requests
+from config_loader import load_config
 
 class MistralModel:
     def __init__(self, name):
         self.name = name
-        config = json.load(open("config.json"))
+        config = load_config()
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['mistral'].get('hparams') or {})
 

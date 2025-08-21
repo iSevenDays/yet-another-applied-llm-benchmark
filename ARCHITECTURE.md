@@ -25,7 +25,7 @@ Unlike academic benchmarks that focus on abstract capabilities, this framework e
 ├── llm_cache.py               # Dedicated LLM response caching with backward compatibility
 ├── docker_controller.py       # Container isolation and execution management
 ├── create_results_html.py     # HTML report generation
-├── config.json.example        # Configuration template
+├── config.yaml.example        # Configuration template
 ├── Dockerfile                 # Multi-language container environment
 ├── requirements.txt           # Python dependencies
 ├── requirements-extra.txt     # Extended model support dependencies
@@ -292,7 +292,7 @@ def __call__(self, input_data):
 
 **Reason Tracking**: Complete execution trace for debugging and reporting
 
-### Configuration System (`config.json`)
+### Configuration System (`config.yaml`)
 
 Centralized configuration management with provider-specific settings and global hyperparameters.
 

@@ -4,12 +4,13 @@ from vertexai.preview.generative_models import GenerativeModel
 
 
 import json
+from config_loader import load_config
 import requests
 
 class VertexAIModel:
     def __init__(self, name):
         self.name = name
-        config = json.load(open("config.json"))
+        config = load_config()
         self.hparams = config['hparams']
         self.hparams.update(config['llms']['vertexai'].get('hparams') or {})
 

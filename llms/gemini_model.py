@@ -1,11 +1,12 @@
 import requests
 import json
+from config_loader import load_config
 
 class GeminiModel:
     def __init__(self, name):
         self.name = name
 
-        config = json.load(open("config.json"))
+        config = load_config()
         self.api_key = config['llms']['google']['api_key'].strip()
 
         self.hparams = config['hparams']

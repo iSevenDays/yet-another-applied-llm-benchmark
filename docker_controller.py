@@ -31,6 +31,7 @@ import struct
 import fcntl
 import random
 import json
+from config_loader import load_config
 import re
 import logging
 import queue
@@ -42,7 +43,7 @@ import atexit
 # A LANGUAGE MODEL DIRECTLY ON YOUR COMPUTER WITH NO SAFETY CHECKS.
 I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKING_THEM_HALT_AND_CATCH_FIRE = False
 
-BACKEND = json.load(open("config.json"))['container']
+BACKEND = load_config()['container']
 
 # Container Pool for Performance Optimization
 class ContainerPool:

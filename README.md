@@ -169,7 +169,7 @@ there are a few setup steps before you can run the benchmark.
 ## Add API keys
 
 You should add API keys for any model you want to evaluate. The keys are stored
-in the config.json file. You can find a template at [config.json.example](config.json.example)
+in the config.yaml file. You can find a template at [config.yaml.example](config.yaml.example)
 
 Whatever model you are testing, you will also need to load API keys for OpenAI as the default
 evaluation model. This is because a few of the questions require evaluation by a second language model
@@ -267,12 +267,40 @@ Running the benchmark with OpenAI-like endpoint. Prefix models with `openai_`.
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model openai_llama3.1:latest
 ```
 
-Ollama base URL can be specified in config.json
+Ollama base URL can be specified in config.yaml
 
 If you've run generated many saved runs previously, you can load them into one grid with
 
 ```bash
 python main.py --load-saved --generate-report --model [model1] --model [model2]
+```
+
+**Auto-discovering All Previous Models:**
+
+If you have run many models previously and want to include all of them in your comparison report without manually specifying each one, you can use the auto-discovery feature:
+
+```bash
+# Load all previously saved models automatically
+python main.py --load-saved --generate-report --add-all
+```
+
+You can also combine auto-discovery with specific models:
+
+```bash
+# Load all previous models AND add specific new ones
+python main.py --load-saved --generate-report --add --model [new-model1] --model [new-model2]
+```
+
+This is particularly useful when you have accumulated results from many different models over time and want to generate comprehensive comparison reports without having to remember and type all the model names.
+
+**⚠️ Important:** The `--add` flag **adds ALL previously saved models** to your report, not just the ones you specify with `--model`. If you only want specific models in your report, **do NOT use `--add`** - use only `--model` flags:
+
+```bash
+# ✅ CORRECT: Only include these 4 specific models
+python main.py --load-saved --generate-report --model model1 --model model2 --model model3 --model model4
+
+# ❌ WRONG: This includes ALL saved models PLUS the 4 specified ones  
+python main.py --load-saved --generate-report --add --model model1 --model model2 --model model3 --model model4
 ```
 
 And finally, if you've run the tests previously at one git commit, and want to just run any tests that have changed since then, you can run
@@ -292,7 +320,7 @@ appropriate model.
 
 ## Chaning of the System Prompt for Ollama
 
-Set OLLAMA_SYSTEM_PROMPT or config.json "system_prompt" variable.
+Set OLLAMA_SYSTEM_PROMPT or config.yaml "system_prompt" variable.
 
 ## Adding new test cases
 

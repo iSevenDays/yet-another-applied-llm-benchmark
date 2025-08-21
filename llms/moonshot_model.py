@@ -4,10 +4,11 @@ import base64
 
 from openai import OpenAI
 import json
+from config_loader import load_config
 
 class MoonshotAIModel:
     def __init__(self, name):
-        config = json.load(open("config.json"))
+        config = load_config()
         api_key = config['llms']['moonshot']['api_key'].strip()
         self.client = OpenAI(api_key=api_key, base_url='https://api.moonshot.cn/v1')
         self.name = name

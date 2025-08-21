@@ -31,6 +31,30 @@ from PIL import Image
 import docker_controller
 from docker_controller import invoke_docker, DockerJob
 
+def strip_thinking_tokens(text):
+    """Remove thinking tokens from text output - used for both main and eval LLM responses.
+    
+    Handles multiple formats:
+    - Simple tags: <think>...</think>, <seed:think>...</seed:think>
+    - OpenAI Harmony format: GPT-OSS analysis/commentary channels
+    """
+    result = text
+    
+    # Handle simple thinking tags
+    result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL)
+    result = re.sub(r'<seed:think>.*?</seed:think>', '', result, flags=re.DOTALL)
+    
+    # Handle GPT-OSS Harmony format - remove analysis and commentary channels
+    # Pattern: <|start|>assistant<|channel|>analysis<|message|>...thinking...<|end|>
+    result = re.sub(r'<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
+    result = re.sub(r'<\|start\|>assistant<\|channel\|>commentary<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
+    
+    # Alternative pattern without assistant role prefix
+    result = re.sub(r'<\|channel\|>analysis<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
+    result = re.sub(r'<\|channel\|>commentary<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
+    
+    return result
+
 # Model role constants
 LLM = "llm"                         # The LLM under evaluation
 EVAL_LLM = "eval_llm"               # A good LLM that can act as a judge
@@ -324,7 +348,8 @@ class SubstringEvaluator(Node):
             cond = False
             
         result = bool(cond)
-        yield result, Reason(type(self), [self.substr, result])
+        # Include expected, result, and actual output for better debugging
+        yield result, Reason(type(self), [self.substr, result, output])
 
 class RegexEvaluator(Node):
     """
@@ -341,9 +366,9 @@ class RegexEvaluator(Node):
         match = re.search(self.pattern, output, flags)
 
         if match:
-            yield True, Reason(type(self), [self.pattern, True])
+            yield True, Reason(type(self), [self.pattern, True, output])
         else:
-            yield False, Reason(type(self), [self.pattern, False])
+            yield False, Reason(type(self), [self.pattern, False, output])
             
 class ContainsIntEvaluator(Node):
     """
@@ -358,7 +383,7 @@ class ContainsIntEvaluator(Node):
         all_integers = [x.replace(",", "") for x in all_integers]
         
         found = str(self.num) in all_integers
-        yield found, Reason(type(self), [self.num, found])
+        yield found, Reason(type(self), [self.num, found, output])
             
 class EqualEvaluator(Node):
     """
@@ -370,7 +395,7 @@ class EqualEvaluator(Node):
     def __call__(self, output):
         """Check if output exactly matches the goal."""
         matches = (self.goal == output)
-        yield matches, Reason(type(self), [self.goal, matches])
+        yield matches, Reason(type(self), [self.goal, matches, output])
 
 class UntilDone(Node):
     """
@@ -486,6 +511,9 @@ class ExtractCode(Node):
             output = self.eval_llm(f"Take the below answer to my programming question {language} and return just the complete code in a single file so I can copy and paste it into an editor and directly run it. Remove any test cases or example code after the function definition. Remove any main function. I will write those myself. Do include header imports. DO NOT MODIFY THE CODE OR WRITE NEW CODE. Here is the code: \n" + orig_output + ("\nI will be running this code with the following helper functions:\n" + self.postfix if self.postfix else ""))
 
         logging.debug(f"ExtractCode eval_llm output ({len(output)} chars): {output[:200]}{'...' if len(output) > 200 else ''}")
+
+        # Strip thinking tokens from eval_llm output
+        output = strip_thinking_tokens(output)
 
         for maybe in self.try_extract(output):
             yield maybe, Reason(type(self), maybe)
@@ -718,9 +746,7 @@ class LLMRun(Node):
         logging.debug(f"LLMRun response ({len(out) if out else 0} chars): {out[:200] if out else '(empty)'}{'...' if out and len(out) > 200 else ''}")
         
         if self.strip_think:
-            out = re.sub(r'<think>(.*?)</think>', r'\1', out)
-        else:
-            out = out
+            out = strip_thinking_tokens(out)
         yield out, Reason(type(self), (to_send, out))
 
 class LLMConversation(Node):
@@ -748,7 +774,6 @@ class SeleniumDraw(Node):
 
     def __call__(self, code):
         try:
-        #if 1:
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
             
@@ -793,8 +818,6 @@ class SeleniumDraw(Node):
             
             yield img_data, Reason(type(self), img_data)
 
-        #try:
-            pass
     
         except Exception as e:
             import logging
@@ -841,14 +864,15 @@ class JSONSubsetEvaluator(Node):
         return True
         
     def __call__(self, output):
+        original_output = output  # Keep original for debugging
         try:
-            output = json.loads(output)
+            parsed_output = json.loads(output)
         except json.JSONDecodeError:
-            yield False, Reason(type(self), [self.goal, False])
+            yield False, Reason(type(self), [self.goal, False, original_output])
             return
 
-        ok = self.check(self.goal, output)
-        yield ok, Reason(type(self), [self.goal, ok])
+        ok = self.check(self.goal, parsed_output)
+        yield ok, Reason(type(self), [self.goal, ok, original_output])
 
 class LLMVisionRun(Node):
     """

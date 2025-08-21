@@ -1,0 +1,57 @@
+# Yet Another Applied LLM Benchmark - Configuration
+# YAML format for better readability and inline documentation
+
+# Container backend (docker or podman)
+container: docker
+
+# Optional system prompt applied to all models
+system_prompt: ""
+
+# Global hyperparameters applied to all models (can be overridden per provider)
+hparams:
+  max_tokens: 4096
+
+# Model provider configurations
+llms:
+  # Google Vertex AI
+  vertexai:
+    project_id: "TODO"
+
+  # OpenAI-compatible API (main endpoint with thinking budget support)
+  openai:
+    api_key: "sk-12345"
+    api_base: "http://192.168.0.24:8000/v1"
+    # Provider-specific parameters
+    hparams:
+      extra_body:
+        chat_template_kwargs:
+          thinking_budget: 32768 # Thinking tokens budget for reasoning models
+
+  # OpenAI-compatible API (evaluation endpoint)
+  openai_eval:
+    api_key: "sk-12345"
+    api_base: "http://192.168.0.50:1234/v1"
+
+  # Mistral AI
+  mistral:
+    api_key: "TODO"
+
+  # Cohere
+  cohere:
+    api_key: "TODO"
+
+  # Anthropic Claude
+  anthropic:
+    api_key: "TODO"
+
+  # Moonshot AI
+  moonshot:
+    api_key: "TODO"
+
+  # Groq
+  groq:
+    api_key: "TODO"
+
+  # Local Ollama instance
+  ollama:
+    api_base: "http://192.168.0.121:11434"
