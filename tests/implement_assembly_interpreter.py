@@ -15,6 +15,9 @@ Each instruction is of the form
 OP ARG1 ARG2 ...
 where ARGn can be either a register (e.g., R1) or a constant (e.g., 10).
 
+IMPORTANT: When an argument is a register name like R1, use the VALUE stored in that register, not the register name itself.
+For example, if R1 contains 5, then "STORE R2 R1" stores R2's value into memory address 5, not into "R1".
+
 Labels are written with a lowercase word followed by colon.
 
 The assembly language supports the following instructions:

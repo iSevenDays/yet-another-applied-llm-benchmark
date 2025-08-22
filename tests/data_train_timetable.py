@@ -1,6 +1,6 @@
 from evaluator import *
 
-DESCRIPTION = "Test if the model can extract structured data from (somewhat) unstructured text."
+DESCRIPTION = "Test if the model can extract structured data from complex tabular text requiring precise column-position mapping."
 
 TAGS = ['data']
 
@@ -52,7 +52,16 @@ question_hard = '''It's currently 6:00pm and I'm at Belmont station. I want to g
 
 TestTrainScheduleHard = (question_hard+timetable) >> LLMRun() >> (SubstringEvaluator("6:41") & SubstringEvaluator("Millbrae"))
 
-question_python = '''Write a python function called 'mtv_to_sf(str) -> json' that will take a timetable like the following as a string as input, and return how long it takes the 703, 303, and 509 trains to get from Mountain View to San Francisco in minutes? Answer in JSON {"703": time in minutes, "303": ..., "509": ...}. The timetable may change over time so write the function to look at the new data I have in the future.'''
+question_python = '''Write a python function called 'mtv_to_sf(str) -> json' that will take a timetable like the following as a string as input, and return how long it takes the 703, 303, and 509 trains to get from Mountain View to San Francisco in minutes?
+
+IMPORTANT: 
+- The first row contains train numbers (101, 501, 103, 401, 105, 701, 301, 403, 107, 703, 303, 405, etc.)
+- Find the exact column positions of trains 703, 303, and 509 in this header row
+- Use those same column positions to extract times from "Mountain View" and "San Francisco" station rows
+- Calculate travel time in minutes for each train
+- Return JSON format: {"703": time in minutes, "303": ..., "509": ...}
+
+The timetable may change over time so write the function to look at the new data I have in the future.'''
 
 
 test_case, answer = make_python_test([("mtv_to_sf("+repr(timetable)+")", {

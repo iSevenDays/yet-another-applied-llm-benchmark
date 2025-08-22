@@ -18,7 +18,8 @@ def test_ok():
     if 'ELF' not in os.popen("file image.png").read():
         return False
     from PIL import Image
-    img = Image.open("image.png").numpy()
+    import numpy as np
+    img = np.array(Image.open("image.png"))
     
     return img[0, 0].tolist() == [255, 0, 0] and img[0, 1].tolist() == [0, 255, 0] and img[0, 2].tolist() == [0, 0, 255] and img.shape == (100, 100, 3)
 

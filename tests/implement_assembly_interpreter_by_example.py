@@ -72,13 +72,15 @@ loop:
     JF loop
 """
 
-question = f"""Here is an example program from a new assmebly language I made up that computes primes:
+question = f"""Here is an example program from a new assembly language I made up that computes primes:
 
 ```
 {primes}
 ```
 
-ite me a python interpreter `evaluate(str)` that returns the resulting memory state after running the program. For example, `evaluate(program)` should return `[2, 3, 5, 7, ...]` for the above program.
+Write me a python interpreter `evaluate(str)` that returns the resulting memory state after running the program. For example, `evaluate(program)` should return `[2, 3, 5, 7, ...]` for the above program.
+
+IMPORTANT: Arguments can be registers (like R1) or constants (like 10). When an argument is a register name, use the VALUE stored in that register, not the register name itself. For example, if R1 contains 5, then "STORE R2 R1" stores R2's value into memory address 5.
 """
 
 

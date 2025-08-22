@@ -17,6 +17,10 @@ INPUT: `.database`
 
 OUTPUT: ```main: people.db r/w```
 
+INPUT: `.schema`
+
+OUTPUT: ```CREATE TABLE people (name TEXT, favorite_friend TEXT, age INT, profession TEXT);```
+
 Now your turn. What do you want to run? Do not explain yourself, just give me exactly one command, ending with ; if necessary. Run small queries one at a time; think step by step. Start your response with INPUT:
 """
 
@@ -31,7 +35,7 @@ def setup():
     
     # Create table named people with columns for name, favorite friend, age, and profession
     cursor.execute('''CREATE TABLE people
-                 (a_name TEXT, favorite_friend TEXT, person_age INT, the_profession TEXT)''')
+                 (name TEXT, favorite_friend TEXT, age INT, profession TEXT)''')
     
     # List of people data to insert into the people table
     people_data = [
@@ -67,7 +71,7 @@ def test_ok():
     cursor = conn.cursor()
 
     # Get Victor's age and profession
-    cursor.execute('SELECT person_age, the_profession FROM people WHERE a_name = "Victor"')
+    cursor.execute('SELECT age, profession FROM people WHERE name = "Victor"')
     out = cursor.fetchone()
     if out is None:
         return False
@@ -78,13 +82,32 @@ def test_ok():
 
 
 def do_extract(x):
+    import re
+    
+    # Handle "INPUT: command" format
     if 'INPUT:' in x:
         x = x.split("INPUT:")[1]
-    try:
-        to_send = x.split("`")[1]
-    except:
-        to_send = x.split("\n")[0]
-    return to_send
+    
+    # Remove any markdown formatting and extra whitespace
+    x = x.strip()
+    
+    # Try multiple extraction patterns
+    patterns = [
+        r'`([^`]+)`',  # Backtick format: `command`
+        r'^([^\n]+)',  # First line
+        r'([^\n]+);',  # Line ending with semicolon
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, x, re.MULTILINE)
+        if match:
+            cmd = match.group(1).strip()
+            if cmd and not cmd.startswith('#'):  # Skip comments
+                return cmd
+    
+    # Fallback: return first non-empty line
+    lines = [line.strip() for line in x.split('\n') if line.strip()]
+    return lines[0] if lines else x.strip()
 
 
 def do_prepare(x):
