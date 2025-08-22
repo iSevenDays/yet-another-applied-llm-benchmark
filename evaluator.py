@@ -30,30 +30,7 @@ from PIL import Image
 
 import docker_controller
 from docker_controller import invoke_docker, DockerJob
-
-def strip_thinking_tokens(text):
-    """Remove thinking tokens from text output - used for both main and eval LLM responses.
-    
-    Handles multiple formats:
-    - Simple tags: <think>...</think>, <seed:think>...</seed:think>
-    - OpenAI Harmony format: GPT-OSS analysis/commentary channels
-    """
-    result = text
-    
-    # Handle simple thinking tags
-    result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL)
-    result = re.sub(r'<seed:think>.*?</seed:think>', '', result, flags=re.DOTALL)
-    
-    # Handle GPT-OSS Harmony format - remove analysis and commentary channels
-    # Pattern: <|start|>assistant<|channel|>analysis<|message|>...thinking...<|end|>
-    result = re.sub(r'<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
-    result = re.sub(r'<\|start\|>assistant<\|channel\|>commentary<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
-    
-    # Alternative pattern without assistant role prefix
-    result = re.sub(r'<\|channel\|>analysis<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
-    result = re.sub(r'<\|channel\|>commentary<\|message\|>.*?<\|end\|>', '', result, flags=re.DOTALL)
-    
-    return result
+from thinking_handler_go import strip_thinking_tokens
 
 # Model role constants
 LLM = "llm"                         # The LLM under evaluation
