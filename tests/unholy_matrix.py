@@ -4,16 +4,13 @@ DESCRIPTION = "Test if the model can solve a rather hard dynamic programming pro
 
 TAGS = ['code', 'c']
 
-question = "A binary 8x8 matrix is 'unholy' if there are no isolated 1s. A 1 is isolated if there isn't another 1 in any of the 4 direct cardinal directions. Write a C program that counts the total number of unholy 8x8 matricies."
+question = "A binary 8x8 matrix is 'unholy' if there are no isolated 1s. A 1 is isolated if there isn't another 1 in any of the 4 direct cardinal directions (up, down, left, right). Positions outside the matrix boundaries are considered to contain 0s. Write a C program that counts the total number of unholy 8x8 matrices."
 
 
 step = """To solve this question:
-- Use bit arithmetic and an unsigned long to represent the matrix.
-- Write a function is_unholy that tests if a matrix is unholy by bit-shifting and masking.
-
-Use a dynamic program to count the number of unholy matricies.
-- Recurse on the number of rows the matrix has.
-- Enumerate all 2^16 next two rows. This is enough to completely isolate the prior solutions from the next.
+- Use bit arithmetic and a uint64_t to represent the matrix.
+- Use dynamic programming to count the number of unholy matrices.
+- Consider processing the matrix row by row.
 
 Write out a plan for the program, and then implement the plan in C."""
 

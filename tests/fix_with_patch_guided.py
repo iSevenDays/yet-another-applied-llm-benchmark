@@ -1,8 +1,8 @@
 from evaluator import *
 
-DESCRIPTION = "Expert-level debugging test requiring reverse-engineering of regex bugs and patch generation"
+DESCRIPTION = "Guided assessment of regex debugging and patch generation with clear problem statement"
 
-TAGS = ['expert', 'debugging', 'regex', 'patch', 'integration']
+TAGS = ['regex', 'patch', 'debugging', 'guided']
 
 code = """import re
 
@@ -27,17 +27,28 @@ class Tokenizer:
         return self.tokens[self.position]
 """
 
-question = f"""
-Write a .patch file to stdout that will fix the bug in this tokenizer. Still keep the new file name the same after patching.
+question_guided = f"""
+This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5", 
+it currently produces: ['cos', '(', '', ')', '+', 'sin', '(', '', ')', '*', '']
+but should produce: ['cos', '(', '1', ')', '+', 'sin', '(', '23', ')', '*', '5']
 
-I'll evaluate you based on my ability to do
-- echo [your patch] > fix.patch
-- patch < fix.patch
-- python3 run_tokenizer.py
+The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()` 
+in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups 
+return empty strings.
 
+Write a .patch file that fixes this regex bug by removing the unnecessary capturing group.
 
+The patch should be in unified diff format:
+```
+--- filename.py
++++ filename.py  
+@@ -line,count +line,count @@
+ context line
+-old line  
++new line
+```
 
-Here is the entirety of run_tokenizer.py:
+Here is the code to fix:
 ```python
 {code}
 ```
@@ -71,46 +82,6 @@ class Tokenizer:
     time.sleep(.5)
 
 
-def check():
-    import os
-    import time
-    os.system("patch < fix.patch")
-    time.sleep(.5)
-    import run_tokenizer
-    return run_tokenizer.Tokenizer("cos(1)+sin(23)*5").tokens == ['cos', '(', '1', ')', '+', 'sin', '(', '23', ')', '*', '5']
-
-
-TestFixPatch = Setup(setup_fn) >> question >> LLMRun() >> ExtractCode(manual="Take the below answer to my question and return just the complete .patch in a single file so I can copy and paste it into an editor and apply it with the `patch` tool as-is. Include nothing else other than the patch. Here is the code: <A>") >> MakeFile("fix.patch") >> PyEvaluator(check)
-
-
-# Guided variant with clear problem statement
-question_guided = f"""
-This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5", 
-it currently produces: ['cos', '(', '', ')', '+', 'sin', '(', '', ')', '*', '']
-but should produce: ['cos', '(', '1', ')', '+', 'sin', '(', '23', ')', '*', '5']
-
-The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()` 
-in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups 
-return empty strings.
-
-Write a .patch file that fixes this regex bug by removing the unnecessary capturing group.
-
-The patch should be in unified diff format:
-```
---- filename.py
-+++ filename.py  
-@@ -line,count +line,count @@
- context line
--old line  
-+new line
-```
-
-Here is the code to fix:
-```python
-{code}
-```
-"""
-
 def check_guided():
     import os
     import time
@@ -135,5 +106,4 @@ TestFixPatchGuided = Setup(setup_fn) >> question_guided >> LLMRun() >> ExtractCo
 
 
 if __name__ == "__main__":
-    print("Expert test result:", run_test(TestFixPatch))
-    print("Guided test result:", run_test(TestFixPatchGuided))
+    print(run_test(TestFixPatchGuided))
