@@ -28,23 +28,12 @@ Unlike academic benchmarks that focus on abstract capabilities, this framework e
 ├── config.yaml.example        # Configuration template
 ├── Dockerfile                 # Multi-language container environment
 ├── requirements.txt           # Python dependencies
-├── requirements-extra.txt     # Extended model support dependencies  
-├── thinking_handler_go.py     # Python wrapper for Go thinking token processing
-├── evaluators_go.py          # Python wrapper for Go evaluation operations
+├── requirements-extra.txt     # Extended model support dependencies
 ├── tests/                     # Test case implementations (~100 tests)
 ├── unittests/                 # Unit tests for framework components
 │   ├── print_hello.py         # Simple test example
 │   ├── convert_to_c.py        # Complex code translation test
 │   └── ...
-├── go/                        # Go performance optimization modules
-│   ├── thinking_handler.go    # High-performance thinking token processing
-│   ├── evaluators.go         # High-performance string evaluation
-│   ├── thinking_handler_test.go # Go tests for thinking functionality  
-│   ├── evaluators_test.go    # Go tests for evaluator functionality
-│   ├── go.mod                # Go module definition
-│   ├── Makefile              # Build system for Go libraries
-│   ├── libthinking_handler.so # Compiled thinking handler library
-│   └── libevaluators.so      # Compiled evaluators library
 ├── llms/                      # Model adapter implementations
 │   ├── openai_model.py        # OpenAI API integration
 │   ├── anthropic_model.py     # Anthropic API integration
@@ -631,61 +620,3 @@ evaluation_examples/
 - **Performance Benchmarking**: Execution time/memory measurement
 
 This architecture enables systematic evaluation of LLM capabilities on realistic programming tasks while maintaining security, reproducibility, and extensibility.
-
-## Go Performance Optimization Layer
-
-The framework implements a hybrid Python-Go architecture for performance-critical operations, maintaining full API compatibility while achieving significant performance improvements.
-
-### Go Modules (`go/` directory)
-
-**thinking_handler.go**: High-performance thinking token processing
-- Regex-based detection and stripping of thinking tags (`<think>`, `<seed:think>`, GPT-OSS Harmony format)
-- HTML generation for collapsible thinking displays
-- 3-10x performance improvement over Python regex operations
-
-**evaluators.go**: High-performance string evaluation operations  
-- `RegexEvaluator`: Compiled regex pattern matching with caching
-- `SubstringEvaluator`: Optimized string search with case-insensitive options
-- `IntegerEvaluator`: Integer detection in text with comma-separated number support
-- 2-7x performance improvement for evaluation operations
-
-### Migration Strategy
-
-**Hybrid Architecture Approach:**
-- **Python Layer**: Maintains existing Node classes and APIs for compatibility
-- **Go Layer**: Implements performance-critical string processing operations
-- **C Interface**: ctypes-based bridge between Python and Go shared libraries
-
-**Benefits:**
-- **Zero Breaking Changes**: All existing tests and code continue working unchanged
-- **Gradual Migration**: Components migrated individually with fallback safety
-- **Performance Gains**: 2-10x speedup for regex and string operations
-- **Maintainability**: Clear separation between interface (Python) and implementation (Go)
-
-**Current Migration Status:**
-```
-✅ ThinkingHandler: Complete - thinking token processing in Go
-✅ Evaluators: Complete - regex, substring, integer evaluation in Go  
-⏳ Future: ExtractCode, JSON parsing, additional string utilities
-```
-
-### Go Library Architecture
-
-**Build System:**
-```bash
-cd go/
-make build    # Builds libthinking_handler.so and libevaluators.so
-make test     # Runs comprehensive Go test suite
-make clean    # Removes build artifacts
-```
-
-**Python Integration:**
-- `thinking_handler_go.py`: Python wrapper for thinking token operations
-- `evaluators_go.py`: Python wrapper for evaluation operations  
-- Automatic fallback handling and error recovery
-
-**Performance Characteristics:**
-- **Regex Operations**: 3-7x faster than Python `re` module
-- **String Search**: 2-5x faster than Python string operations  
-- **Memory Usage**: Lower memory footprint due to Go's efficient string handling
-- **Startup Time**: Minimal overhead due to shared library approach

@@ -33,7 +33,6 @@ from pygments.lexers import PythonLexer
 from pygments.formatters import HtmlFormatter
 
 from evaluator import *
-from thinking_handler_go import convert_thinking_to_collapsible_html, has_thinking_tokens, go_thinking_handler
 
 import re
 
@@ -94,15 +93,7 @@ def format_markdown(reason, indent=0):
     elif reason.node == SeleniumDraw:
         return f"{pounds} HTML Render\nRendering the webpage gives the following image:\n{reason.children}\n"
     elif reason.node in (LLMRun, LLMVisionRun, LLMConversation):
-        query = reason.children[0].strip()
-        output = reason.children[1].strip()
-        
-        # Convert thinking tokens to collapsible HTML if present
-        if has_thinking_tokens(output):
-            output_with_thinking = convert_thinking_to_collapsible_html(output)
-            return f"{pounds} LLM Generation\n#{pounds} Query\n{fix(query)}\n#{pounds} Output\n{fix(output_with_thinking)}\n"
-        else:
-            return f"{pounds} LLM Generation\n#{pounds} Query\n{fix(query)}\n#{pounds} Output\n{fix(output)}\n"
+        return f"{pounds} LLM Generation\n#{pounds} Query\n{fix(reason.children[0].strip())}\n#{pounds} Output\n{fix(reason.children[1].strip())}\n"
     elif reason.node in (PythonRun, CRun, CppRun, RustRun, BashRun, TerminalRun, SQLRun, SwiftRun):
         return f"{pounds} Run Code Interpreter\nRunning the following program:\n> ```\n{fix(reason.children[0].strip())}\n> ```\nAnd got the output:\n```\n{reason.children[1]}\n```\n"
     elif reason.node == ExtractCode:
@@ -481,10 +472,6 @@ function hiderows() {
     
 <div class="clear-float"></div>
     """
-    
-    # Add thinking handler CSS and JavaScript after the main template
-    thinking_css = go_thinking_handler.get_css_styles()
-    thinking_js = go_thinking_handler.get_javascript()
     one_tab = """
 <div id="tab{}" class="tab-content">
     {}
@@ -580,17 +567,7 @@ function hiderows() {
                 example_html += one_tab.format((idx+1),final_output)
             
             result_file = sanitize_filename(column_key + "_" + row_key)
-            
-            # Add thinking handler styles and scripts to the HTML
-            full_html = css + example_html + f"""
-<style>
-{thinking_css}
-</style>
-<script>
-{thinking_js}
-</script>
-"""
-            open(os.path.join("evaluation_examples", result_file + ".html"), "w").write(full_html)
+            open(os.path.join("evaluation_examples", result_file + ".html"), "w").write(css+example_html)
 
 def convert_to_color_through_yellow(value):
     value *= 255
