@@ -5,9 +5,6 @@ import sys
 import os
 import unittest
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from evaluator import SubstringEvaluator, RegexEvaluator, EqualEvaluator
 from main import format_failure_reason
 

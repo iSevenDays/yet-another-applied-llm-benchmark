@@ -3,8 +3,6 @@ import unittest
 import sys
 import os
 
-# Add parent directory to path to import evaluator
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evaluator import strip_thinking_tokens
 
 class TestStripThink(unittest.TestCase):
