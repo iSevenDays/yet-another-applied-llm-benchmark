@@ -36,11 +36,11 @@ import multiprocessing as mp
 from functools import partial
 
 # Configuration constants
-MAX_FAILURE_REASON_LENGTH = 200
-MAX_WAIT_TIME_SECONDS = 900  # 15 minutes
+MAX_FAILURE_REASON_LENGTH = 400
+MAX_WAIT_TIME_SECONDS = 900*2  # 30 minutes
 STATUS_LOG_INTERVAL_SECONDS = 30
 WORKER_LOG_CHUNK_INTERVAL = 500
-STAGE_HANG_THRESHOLD_SECONDS = 60
+STAGE_HANG_THRESHOLD_SECONDS = 120
 DEFAULT_MODELS = [
     "gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", 
     "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", 
@@ -176,7 +176,7 @@ def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, 
     result_str = "PASS" if test_passed else "FAIL"
     pbar.write(f"{result_str}: {test_name}")
     if not test_passed:
-        reason_str = format_failure_reason(failure_reason)
+        reason_str = _format_failure_reason(failure_reason, MAX_FAILURE_REASON_LENGTH)
         pbar.write(f"  Reason: {reason_str}")
 
     sr[f"{filename}.{test_name}"] = (test_passed, failure_reason)
@@ -248,91 +248,25 @@ def _setup_worker_logging():
         print(f"Worker logging setup failed: {log_setup_error}")
         logging.basicConfig(level=logging.WARNING)
 
-def format_failure_reason(failure_reason, max_length=MAX_FAILURE_REASON_LENGTH):
-    """Extract readable failure message from Reason object or string"""
+
+def _format_failure_reason(failure_reason, max_length=400):
+    """
+    Simple error formatting following SPARC principles.
+    Delegates to Reason.describe_failure() when available.
+    """
+    # Use Reason's own describe_failure method if available
+    if hasattr(failure_reason, 'describe_failure'):
+        description = failure_reason.describe_failure(max_length)
+        if description:
+            return description
     
-    def find_evaluator_failure(reason):
-        """Recursively find the deepest evaluator node that failed"""
-        if not hasattr(reason, 'node') or not hasattr(reason, 'children'):
-            return None
-            
-        node_name = reason.node.__name__ if hasattr(reason.node, '__name__') else str(reason.node)
-        
-        # If this is an evaluator node, check if it failed
-        if 'Evaluator' in node_name and len(reason.children) >= 2:
-            expected, result = reason.children[0], reason.children[1]
-            actual_output = reason.children[2] if len(reason.children) >= 3 else "(output not captured)"
-            
-            if result is False:  # This evaluator failed
-                # Truncate actual output for readability
-                if isinstance(actual_output, str) and len(actual_output) > 100:
-                    actual_truncated = actual_output[:97] + "..."
-                else:
-                    actual_truncated = str(actual_output)
-                
-                return f"{node_name}: Expected '{expected}', got '{actual_truncated}'"
-        
-        # For ThenNode, provide details about which step failed
-        if node_name == 'ThenNode' and isinstance(reason.children, (list, tuple)) and len(reason.children) >= 2:
-            step1_reason, step2_reason = reason.children[0], reason.children[1]
-            if hasattr(step1_reason, 'node') and hasattr(step2_reason, 'node'):
-                step1_name = step1_reason.node.__name__ if hasattr(step1_reason.node, '__name__') else str(step1_reason.node)
-                step2_name = step2_reason.node.__name__ if hasattr(step2_reason.node, '__name__') else str(step2_reason.node)
-                
-                # Check for actual error details in the reasons
-                error_detail = ""
-                for step_name, step_reason in [(step1_name, step1_reason), (step2_name, step2_reason)]:
-                    if hasattr(step_reason, 'children') and step_reason.children:
-                        # Look for error strings in the children
-                        for child in (step_reason.children if isinstance(step_reason.children, (list, tuple)) else [step_reason.children]):
-                            if isinstance(child, str) and ("error" in child.lower() or "exception" in child.lower() or "failed" in child.lower()):
-                                error_detail = f" ({step_name}: {child[:50]}{'...' if len(child) > 50 else ''})"
-                                break
-                        if error_detail:
-                            break
-                
-                return f"ThenNode: {step1_name} -> {step2_name} pipeline failed{error_detail}"
-        
-        # Recursively search children for evaluator failures
-        if isinstance(reason.children, (list, tuple)):
-            for child in reason.children:
-                if hasattr(child, 'node'):
-                    found = find_evaluator_failure(child)
-                    if found:
-                        return found
-        
-        return None
-    
-    if hasattr(failure_reason, 'node'):
-        evaluator_failure = find_evaluator_failure(failure_reason)
-        if evaluator_failure:
-            reason_str = evaluator_failure
-        else:
-            node_name = failure_reason.node.__name__ if hasattr(failure_reason.node, '__name__') else str(failure_reason.node)
-            
-            # For ThenNode failures, try to extract more context
-            if node_name == 'ThenNode' and hasattr(failure_reason, 'children'):
-                children_info = []
-                if isinstance(failure_reason.children, (list, tuple)):
-                    for i, child in enumerate(failure_reason.children):
-                        if hasattr(child, 'node'):
-                            child_name = child.node.__name__ if hasattr(child.node, '__name__') else str(child.node)
-                            children_info.append(f"step{i+1}:{child_name}")
-                        else:
-                            children_info.append(f"step{i+1}:unknown")
-                
-                if children_info:
-                    reason_str = f"ThenNode pipeline failed ({' -> '.join(children_info)})"
-                else:
-                    reason_str = f"Test failed at {node_name} step"
-            else:
-                reason_str = f"Test failed at {node_name} step"
-    else:
-        reason_str = str(failure_reason)
-    
-    if len(reason_str) > max_length: 
+    # Fallback for strings or objects without describe_failure
+    reason_str = str(failure_reason)
+    if len(reason_str) > max_length:
         reason_str = reason_str[:max_length-3] + "..."
+    
     return reason_str
+
 
 def requires_vision_llm(test_node):
     """
@@ -364,40 +298,61 @@ def run_test_with_name(test_data):
     test_data: (test_name, file_path, test_class_name, test_llm_name, eval_llm_name, vision_eval_llm_name)
     Returns: (test_name, test_passed, failure_reason)
     """
+    import time
+    import os
+    import logging
+    
+    start_time = time.time()
+    pid = os.getpid()
+    
     test_name, file_path, test_class_name, test_llm_name, eval_llm_name, vision_eval_llm_name = test_data
+    
+    logging.info(f"WORKER_TRACE[{pid}]: Starting test {test_name}")
+    
     try:
         # Import necessary modules in worker process
         import sys
-        import os
         import importlib.util
-        import logging
         
+        logging.debug(f"WORKER_TRACE[{pid}]: Setting up worker logging")
         _setup_worker_logging()
+        logging.debug(f"WORKER_TRACE[{pid}]: Worker logging setup complete")
         
         # Log worker start with execution timestamp for hang detection
         execution_start = time.time()
         logging.info(f"Worker process started for test: {test_name} EXEC_START:{execution_start}")
         
         # Add current directory to Python path so modules can be imported
+        logging.debug(f"WORKER_TRACE[{pid}]: Setting up Python path")
         sys.path.insert(0, os.getcwd())
         
         # Load the test module
+        logging.debug(f"WORKER_TRACE[{pid}]: Loading test module from {file_path}")
+        module_load_start = time.time()
         module_name = os.path.basename(file_path)[:-3]  # Remove .py extension
         spec = importlib.util.spec_from_file_location(module_name, file_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
+        logging.debug(f"WORKER_TRACE[{pid}]: Module loaded in {time.time() - module_load_start:.3f}s")
         
         # Get the test class
+        logging.debug(f"WORKER_TRACE[{pid}]: Getting test class {test_class_name}")
         test_instance = getattr(module, test_class_name)
         
         # Recreate LLM instances in worker process with caching enabled for performance
+        logging.debug(f"WORKER_TRACE[{pid}]: Creating LLM instances")
+        llm_setup_start = time.time()
         import llm
         test_llm = llm.LLM(test_llm_name, use_cache=True)
         eval_llm = llm.LLM(eval_llm_name, use_cache=True) if eval_llm_name else None
         vision_eval_llm = llm.LLM(vision_eval_llm_name, use_cache=True) if vision_eval_llm_name else None
+        logging.debug(f"WORKER_TRACE[{pid}]: LLM instances created in {time.time() - llm_setup_start:.3f}s")
         
+        logging.debug(f"WORKER_TRACE[{pid}]: About to call run_one_test()")
+        test_execution_start = time.time()
         test_passed, failure_reason = run_one_test(test_instance, test_llm, eval_llm, vision_eval_llm)
+        logging.info(f"WORKER_TRACE[{pid}]: run_one_test() completed in {time.time() - test_execution_start:.3f}s, result: {test_passed}")
         return (test_name, test_passed, failure_reason)
     except Exception as e:
         import traceback
@@ -437,24 +392,34 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     Runs just one test case and returns either true or false and the output.
     """
     import time
+    import os
     
+    pid = os.getpid()
     test_name = getattr(test, '__name__', str(test))
-    logging.info(f"STAGE: Starting test execution for {test_name}")
+    start_time = time.time()
     
+    logging.info(f"TEST_TRACE[{pid}]: Starting test execution for {test_name}")
+    
+    setup_start = time.time()
+    logging.debug(f"TEST_TRACE[{pid}]: Creating test environment and conversation")
     env = Env()
     test.setup(env, Conversation(test_llm), test_llm, eval_llm, vision_eval_llm)
+    logging.debug(f"TEST_TRACE[{pid}]: Test setup completed in {time.time() - setup_start:.3f}s")
 
     try:
         output = "No test output generated"
         stage_count = 0
         last_stage_time = time.time()
         
-        logging.info(f"STAGE: Entering test pipeline for {test_name}")
+        logging.info(f"TEST_TRACE[{pid}]: Entering test pipeline for {test_name}")
+        pipeline_start = time.time()
+        
         for success, output in test():
             stage_count += 1
             current_time = time.time()
             stage_duration = current_time - last_stage_time
             
+            logging.debug(f"TEST_TRACE[{pid}]: Pipeline stage {stage_count} completed in {stage_duration:.3f}s, success: {success}")
             logging.info(f"STAGE: {test_name} stage {stage_count} completed in {stage_duration:.1f}s, success={success}")
             
             if stage_duration > STAGE_HANG_THRESHOLD_SECONDS:
@@ -560,7 +525,7 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
                     result_str = "PASS" if test_passed else "FAIL"
                     pbar.write(f"{result_str}: {test_name}")
                     if not test_passed:
-                        reason_str = format_failure_reason(failure_reason)
+                        reason_str = _format_failure_reason(failure_reason, MAX_FAILURE_REASON_LENGTH)
                         pbar.write(f"  Reason: {reason_str}")
                         
                     pbar.update(1)

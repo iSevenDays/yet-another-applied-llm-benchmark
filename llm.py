@@ -109,8 +109,15 @@ class LLM:
 
         # Check cache if enabled
         if self.use_cache and not skip_cache and self.cache:
+            import time
+            import os
+            cache_start = time.time()
+            pid = os.getpid()
+            logging.debug(f"LLM_TRACE[{pid}]: Starting cache operations for {self.name}")
+            
             # Generate cache key with all parameters that affect response
             hparams = self.model.hparams if hasattr(self.model, 'hparams') else None
+            key_start = time.time()
             cache_key = self.cache.get_cache_key(
                 conversation, 
                 max_tokens=max_tokens, 
@@ -118,14 +125,23 @@ class LLM:
                 add_image=add_image,
                 hparams=hparams
             )
+            logging.debug(f"LLM_TRACE[{pid}]: Cache key generated in {time.time() - key_start:.3f}s")
             
             # Try cache lookup
+            lookup_start = time.time()
+            logging.debug(f"LLM_TRACE[{pid}]: About to call cache.get()")
             cached_response = self.cache.get(cache_key)
+            logging.debug(f"LLM_TRACE[{pid}]: Cache lookup completed in {time.time() - lookup_start:.3f}s, found: {cached_response is not None}")
+            
             if cached_response:
+                logging.debug(f"LLM_TRACE[{pid}]: Returning cached response, total cache time: {time.time() - cache_start:.3f}s")
                 return cached_response
 
+        import os
+        pid = os.getpid()
         log_prompt_snippet = repr(conversation[0])[:200] + ("..." if len(conversation[0]) > 200 else "")
-        logging.info(f"{self.name} CACHE MISS. Prompt starts: {log_prompt_snippet}")
+        logging.info(f"LLM_TRACE[{pid}]: {self.name} CACHE MISS. Prompt starts: {log_prompt_snippet}")
+        logging.debug(f"LLM_TRACE[{pid}]: Proceeding to model API call")
 
         response = "Model API request failed"
 
@@ -137,7 +153,7 @@ class LLM:
             chunk_count = 0
             start_time = time.monotonic()
             last_chunk_time = start_time
-            chunk_timeout = 900  # Max time between chunks before considering stream dead (15 minutes for slow models)
+            chunk_timeout = 900*2  # Max time between chunks before considering stream dead (30 minutes for slow models)
             
             stream = None  # Initialize to prevent UnboundLocalError in finally block
             try:
@@ -227,8 +243,13 @@ class LLM:
                     
                 return ""  # Return empty string instead of raising, to trigger empty response logging
             except Exception as e:
+                # Check if this is the specific RemoteProtocolError that should trigger backoff retry
+                if "RemoteProtocolError" in str(e) and "peer closed connection" in str(e):
+                    logging.warning(f"RemoteProtocolError for {self.name}: {e}")
+                    # Re-raise the exception so the backoff mechanism can catch it
+                    raise e
                 # Check if this is a network timeout specifically
-                if "ReadTimeout" in str(e) or "timed out" in str(e):
+                elif "ReadTimeout" in str(e) or "timed out" in str(e):
                     logging.warning(f"Network timeout for {self.name}: {e}")
                     return ""  # Return empty string to trigger empty response logging
                 

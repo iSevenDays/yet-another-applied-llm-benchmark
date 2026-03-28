@@ -101,10 +101,21 @@ class LLMCache:
     
     def get(self, cache_key: Tuple) -> Optional[str]:
         """Retrieve cached response if available with backward compatibility."""
+        import time
+        import os
+        start_time = time.time()
+        pid = os.getpid()
+        
+        logging.debug(f"CACHE_TRACE[{pid}]: Starting cache.get() for {self.model_name}")
+        
+        logging.debug(f"CACHE_TRACE[{pid}]: About to call _reload_if_changed()")
         self._reload_if_changed()
+        logging.debug(f"CACHE_TRACE[{pid}]: _reload_if_changed() completed in {time.time() - start_time:.3f}s")
         
         # Try direct lookup first (normalized key)
+        lookup_start = time.time()
         response = self._cache.get(cache_key)
+        logging.debug(f"CACHE_TRACE[{pid}]: Direct lookup completed in {time.time() - lookup_start:.3f}s, found: {response is not None}")
         if response:
             logging.info(f"Cache HIT for {self.model_name}")
             return response
@@ -178,18 +189,37 @@ class LLMCache:
     
     def _load_cache(self):
         """Load cache from disk with error handling."""
+        import time
+        import os
+        start_time = time.time()
+        pid = os.getpid()
+        
+        logging.debug(f"CACHE_TRACE[{pid}]: _load_cache() starting for {self.model_name}")
+        
         try:
             if not os.path.exists(self.cache_file):
-                logging.debug(f"No cache file for {self.model_name}, starting fresh")
+                logging.debug(f"CACHE_TRACE[{pid}]: No cache file for {self.model_name}, starting fresh")
                 return
             
+            logging.debug(f"CACHE_TRACE[{pid}]: Opening cache file: {self.cache_file}")
+            file_open_start = time.time()
+            
             with open(self.cache_file, "rb") as f:
+                logging.debug(f"CACHE_TRACE[{pid}]: File opened in {time.time() - file_open_start:.3f}s, acquiring shared lock...")
+                lock_start = time.time()
                 fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                logging.debug(f"CACHE_TRACE[{pid}]: Lock acquired in {time.time() - lock_start:.3f}s, loading pickle...")
+                
+                pickle_start = time.time()
                 self._cache = pickle.load(f)
+                logging.debug(f"CACHE_TRACE[{pid}]: Pickle loaded in {time.time() - pickle_start:.3f}s ({len(self._cache)} entries)")
+                
+                unlock_start = time.time()
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                logging.debug(f"CACHE_TRACE[{pid}]: Lock released in {time.time() - unlock_start:.3f}s")
             
             self._update_file_mtime()
-            logging.info(f"Loaded {len(self._cache)} cache entries for {self.model_name}")
+            logging.info(f"CACHE_TRACE[{pid}]: Loaded {len(self._cache)} cache entries for {self.model_name} in {time.time() - start_time:.3f}s total")
             
         except Exception as e:
             logging.error(f"Cache load failed for {self.model_name}: {e}")
@@ -234,18 +264,31 @@ class LLMCache:
     
     def _reload_if_changed(self):
         """Reload cache if file was modified by another process."""
+        import time
+        import os
+        start_time = time.time()
+        pid = os.getpid()
+        
+        logging.debug(f"CACHE_TRACE[{pid}]: _reload_if_changed() starting for {self.model_name}")
+        
         try:
+            logging.debug(f"CACHE_TRACE[{pid}]: Checking if cache file exists: {self.cache_file}")
             if not os.path.exists(self.cache_file):
+                logging.debug(f"CACHE_TRACE[{pid}]: Cache file does not exist, returning")
                 return
             
+            logging.debug(f"CACHE_TRACE[{pid}]: Cache file exists, checking if cache is empty")
             # Reload if cache is empty but file exists (failed previous load)
             if not self._cache:
-                logging.debug(f"Cache empty but file exists for {self.model_name}, reloading")
+                logging.debug(f"CACHE_TRACE[{pid}]: Cache empty but file exists for {self.model_name}, reloading")
                 self._load_cache()
                 return
             
             # Reload if file was modified
+            logging.debug(f"CACHE_TRACE[{pid}]: About to call os.path.getmtime()")
+            mtime_start = time.time()
             current_mtime = os.path.getmtime(self.cache_file)
+            logging.debug(f"CACHE_TRACE[{pid}]: os.path.getmtime() completed in {time.time() - mtime_start:.3f}s, mtime={current_mtime}")
             if current_mtime > self._file_mtime:
                 logging.debug(f"Cache file updated for {self.model_name}, reloading")
                 self._load_cache()

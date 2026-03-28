@@ -97,6 +97,118 @@ class Reason:
 
     def __repr__(self):
         return repr((self.node, self.children))
+    
+    def describe_failure(self, max_length=400):
+        """
+        Describe this failure in a human-readable way.
+        Following SPARC principles: Simple, focused error description.
+        
+        Args:
+            max_length: Maximum length of description
+            
+        Returns:
+            str: Human-readable failure description
+        """
+        node_name = getattr(self.node, '__name__', None) or self.node.__class__.__name__
+        
+        # Execution nodes (PythonRun, BashRun, etc.)
+        if 'Run' in node_name:
+            return self._describe_execution_failure(node_name, max_length)
+        
+        # Evaluator nodes (SubstringEvaluator, RegexEvaluator, etc.)  
+        elif 'Evaluator' in node_name:
+            return self._describe_evaluator_failure(node_name, max_length)
+        
+        # Pipeline nodes (ThenNode, AndNode, etc.)
+        elif node_name in ['ThenNode', 'AndNode', 'OrNode']:
+            return self._describe_pipeline_failure(node_name, max_length)
+        
+        # Fallback for unknown node types
+        else:
+            return f"{node_name} failed"
+    
+    def _describe_execution_failure(self, node_name, max_length):
+        """Describe execution failures from Run nodes."""
+        if not isinstance(self.children, (list, tuple)) or len(self.children) < 2:
+            return f"{node_name} failed"
+        
+        code, output = self.children[0], self.children[1]
+        
+        if not isinstance(output, str):
+            return f"{node_name} failed"
+        
+        # Extract key error information
+        error_lines = []
+        for line in output.strip().split('\n'):
+            line_clean = line.strip()
+            if any(indicator in line_clean.lower() for indicator in 
+                   ['error:', 'exception:', 'traceback', 'timeout:', 'failed', 'syntax error']):
+                error_lines.append(line_clean)
+        
+        if error_lines:
+            error_summary = ' | '.join(error_lines[:2])  # First 2 error lines
+            description = f"{node_name}: {error_summary}"
+        else:
+            # Show last lines as potential error context
+            output_lines = output.strip().split('\n')
+            if len(output_lines) > 1:
+                description = f"{node_name}: {' | '.join(output_lines[-2:])}"
+            else:
+                description = f"{node_name}: {output.strip()}"
+        
+        return description[:max_length-3] + "..." if len(description) > max_length else description
+    
+    def _describe_evaluator_failure(self, node_name, max_length):
+        """Describe evaluator failures."""
+        if not isinstance(self.children, (list, tuple)) or len(self.children) < 2:
+            return f"{node_name} failed"
+        
+        expected = self.children[0]
+        result = self.children[1] if len(self.children) > 1 else None
+        actual = self.children[2] if len(self.children) > 2 else "(no output)"
+        
+        # Only describe actual failures
+        if result is not False:
+            return None  # Not a failure
+        
+        # Truncate actual output if too long
+        actual_str = str(actual)
+        if len(actual_str) > 100:
+            actual_str = actual_str[:97] + "..."
+        
+        description = f"{node_name}: Expected '{expected}', got '{actual_str}'"
+        return description[:max_length-3] + "..." if len(description) > max_length else description
+    
+    def _describe_pipeline_failure(self, node_name, max_length):
+        """Describe pipeline failures with step context."""
+        if not isinstance(self.children, (list, tuple)) or len(self.children) < 2:
+            return f"{node_name} failed"
+        
+        step1_reason, step2_reason = self.children[0], self.children[1]
+        
+        # Get step names
+        step1_name = "unknown"
+        step2_name = "unknown"
+        
+        if hasattr(step1_reason, 'node') and hasattr(step1_reason.node, '__name__'):
+            step1_name = step1_reason.node.__name__
+        if hasattr(step2_reason, 'node') and hasattr(step2_reason.node, '__name__'):
+            step2_name = step2_reason.node.__name__
+        
+        # Try to get detailed error from steps
+        error_detail = ""
+        for step_name, step_reason in [(step1_name, step1_reason), (step2_name, step2_reason)]:
+            if hasattr(step_reason, 'describe_failure'):
+                step_error = step_reason.describe_failure(max_length=150)
+                if step_error:
+                    # Extract the error part (after the node name)
+                    if ':' in step_error:
+                        error_part = step_error.split(':', 1)[1].strip()
+                        error_detail = f" ({step_name}: {error_part})"
+                        break
+        
+        description = f"{node_name}: {step1_name} -> {step2_name} pipeline failed{error_detail}"
+        return description[:max_length-3] + "..." if len(description) > max_length else description
         
     
 class Node:
@@ -344,7 +456,7 @@ class SubstringEvaluator(Node):
             else:
                 cond = self.substr in output
         except Exception as exc:
-            logging.error(f'SubstringEvaluator error: {exc}, substr: {self.substr}, output type: {type(output)}')
+            print(f'SubstringEvaluator error: {exc}, substr: {self.substr}, output type: {type(output)}')
             cond = False
             
         result = bool(cond)
@@ -736,17 +848,34 @@ class LLMRun(Node):
 
     def __call__(self, output):
         import logging
+        import time
+        import os
+        
+        start_time = time.time()
+        pid = os.getpid()
+        
+        logging.debug(f"LLMRUN_TRACE[{pid}]: Starting LLMRun.__call__")
+        
         llm = getattr(self, self.which_llm)
         to_send = self.check_prompt.replace("<A>", output)
         
-        logging.debug(f"LLMRun prompt ({len(to_send)} chars): {to_send[:200]}{'...' if len(to_send) > 200 else ''}")
+        logging.debug(f"LLMRUN_TRACE[{pid}]: LLMRun prompt ({len(to_send)} chars): {to_send[:200]}{'...' if len(to_send) > 200 else ''}")
         
+        logging.debug(f"LLMRUN_TRACE[{pid}]: About to call LLM.{self.which_llm}()")
+        llm_call_start = time.time()
         out = llm(to_send, json=self.json)
+        llm_call_duration = time.time() - llm_call_start
         
-        logging.debug(f"LLMRun response ({len(out) if out else 0} chars): {out[:200] if out else '(empty)'}{'...' if out and len(out) > 200 else ''}")
+        logging.debug(f"LLMRUN_TRACE[{pid}]: LLM call completed in {llm_call_duration:.3f}s")
+        logging.debug(f"LLMRUN_TRACE[{pid}]: LLMRun response ({len(out) if out else 0} chars): {out[:200] if out else '(empty)'}{'...' if out and len(out) > 200 else ''}")
         
         if self.strip_think:
+            logging.debug(f"LLMRUN_TRACE[{pid}]: Stripping thinking tokens")
             out = strip_thinking_tokens(out)
+            
+        total_duration = time.time() - start_time
+        logging.debug(f"LLMRUN_TRACE[{pid}]: LLMRun complete in {total_duration:.3f}s total")
+        
         yield out, Reason(type(self), (to_send, out))
 
 class LLMConversation(Node):

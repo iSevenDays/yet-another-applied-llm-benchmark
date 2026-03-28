@@ -6,7 +6,7 @@ import os
 import unittest
 
 from evaluator import SubstringEvaluator, RegexEvaluator, EqualEvaluator
-from main import format_failure_reason
+from main import _format_failure_reason as format_failure_reason
 
 class TestErrorReporting(unittest.TestCase):
     """Test that evaluators provide clear error messages with expected vs actual values"""
