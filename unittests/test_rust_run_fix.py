@@ -11,6 +11,8 @@ import pytest
 from evaluator import RustRun, Env, Conversation  
 import docker_controller
 
+pytestmark = pytest.mark.integration
+
 def test_rust_run_simple_hello_world():
     """Test that RustRun properly compiles and executes Rust code."""
     

@@ -8,10 +8,12 @@ import subprocess
 import time
 import sys
 import os
+import pytest
 
 from docker_controller import DockerJob
 
 
+@pytest.mark.integration
 class TestSQLiteIntegration(unittest.TestCase):
     
     @classmethod

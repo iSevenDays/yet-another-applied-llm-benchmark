@@ -13,66 +13,102 @@
 ## You should have received a copy of the GNU General Public License
 ## along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from io import BytesIO
 import os
-import base64
-import requests
-import json
-import pickle
 import time
 import logging
-import fcntl
-import tempfile
+import importlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from llms.openai_model import OpenAIModel
-from llms.anthropic_model import AnthropicModel
 from llm_cache import LLMCache
-from llms.mistral_model import MistralModel
-from llms.vertexai_model import VertexAIModel
-from llms.cohere_model import CohereModel
-from llms.moonshot_model import MoonshotAIModel
-from llms.groq_model import GroqModel
-from llms.ollama_model import OllamaModel
+
+BACKOFF_TIMES = [10, 20, 30, 60, 90, 120, 300]
+DEFAULT_TEST_MODEL = os.getenv("BENCHMARK_DEFAULT_MODEL", "o1-mini")
+DEFAULT_EVAL_MODEL = os.getenv("BENCHMARK_DEFAULT_EVAL_MODEL", "openai_eval_qwen/qwen3-30b-a3b")
+DEFAULT_VISION_EVAL_MODEL = os.getenv("BENCHMARK_DEFAULT_VISION_MODEL")
+OPENAI_CLIENT_TIMEOUT_SECONDS = 3600
+STREAM_CHUNK_TIMEOUT_SECONDS = 3600
+REQUEST_OVERALL_TIMEOUT_SECONDS = 3600
+
+
+def _load_provider_class(module_name, class_name, dependency_name=None):
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        package_hint = dependency_name or module_name.rsplit(".", 1)[-1]
+        raise RuntimeError(
+            f"Provider '{module_name}' requires optional dependency '{package_hint}'. "
+            f"Install the matching extra or dependency group before using this model."
+        ) from exc
+    return getattr(module, class_name)
+
+
+def should_retry_request_error(error):
+    error_type = type(error).__name__
+    error_str = str(error)
+    if "APIConnectionError" in error_type or "ConnectionError" in error_type:
+        return True
+    if "RemoteProtocolError" in error_str and "peer closed connection" in error_str:
+        return True
+    if "ReadTimeout" in error_str or "timed out" in error_str:
+        return True
+    return False
+
+
+def _build_model(name):
+    if name.startswith("openai_eval_"):
+        return OpenAIModel(name.removeprefix("openai_eval_"), config_key="openai_eval")
+    if name.startswith("openai_local_"):
+        return OpenAIModel(name.removeprefix("openai_local_"), config_key="openai_local")
+    if name.startswith("openai_"):
+        return OpenAIModel(name.removeprefix("openai_"))
+    if "gpt" in name or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
+        return OpenAIModel(name)
+    if name.startswith("ollama_"):
+        OllamaModel = _load_provider_class("llms.ollama_model", "OllamaModel")
+        return OllamaModel(name.removeprefix("ollama_"))
+    if "mistral" in name:
+        MistralModel = _load_provider_class("llms.mistral_model", "MistralModel")
+        return MistralModel(name)
+    if "bison" in name or "gemini" in name:
+        VertexAIModel = _load_provider_class("llms.vertexai_model", "VertexAIModel", "google-cloud-aiplatform")
+        return VertexAIModel(name)
+    if "claude" in name:
+        AnthropicModel = _load_provider_class("llms.anthropic_model", "AnthropicModel", "anthropic")
+        return AnthropicModel(name)
+    if "moonshot" in name:
+        MoonshotAIModel = _load_provider_class("llms.moonshot_model", "MoonshotAIModel")
+        return MoonshotAIModel(name)
+    if "command" in name:
+        CohereModel = _load_provider_class("llms.cohere_model", "CohereModel", "cohere")
+        return CohereModel(name)
+    if "llama3" in name or "mixtral" in name or "gemma" in name:
+        GroqModel = _load_provider_class("llms.groq_model", "GroqModel", "groq")
+        return GroqModel(name)
+    raise RuntimeError(f"Unknown model type for name: {name}")
+
+
+def _uses_openai_compatible_api(name):
+    return (
+        name.startswith("openai_eval_")
+        or name.startswith("openai_local_")
+        or name.startswith("openai_")
+        or "gpt" in name
+        or name.startswith("o1")
+        or name.startswith("o3")
+        or name.startswith("o4")
+    )
 
 class LLM:
-    def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams={}):
+    def __init__(self, name="gpt-3.5-turbo", use_cache=True, override_hparams=None):
         self.original_name = name  # Store original name for cache consistency
         self.name = name
         logging.debug(f"Initializing LLM with name: {name}")
-        if 'openai_eval_' in name:
-            model = name.replace('openai_eval_', '')
-            self.model = OpenAIModel(model, config_key='openai_eval')
-        elif 'openai_' in name:
-            model = name.replace('openai_', '')
-            self.model = OpenAIModel(model)
-        elif 'gpt' in name or name.startswith('o1'):
-            self.model = OpenAIModel(name)
-        # elif 'llama' in name:
-        #     self.model = LLAMAModel(name)
-        elif name.startswith('ollama_'):
-            model = name.replace('ollama_', '')
-            self.model = OllamaModel(model)
-        elif 'mistral' in name:
-            self.model = MistralModel(name)
-        elif 'bison' in name or 'gemini' in name:
-            self.model = VertexAIModel(name)
-        #elif 'gemini' in name:
-        #    self.model = GeminiModel(name)
-        elif 'claude' in name:
-            self.model = AnthropicModel(name)
-        elif 'moonshot' in name:
-            self.model = MoonshotAIModel(name)            
-        elif 'command' in name:
-            self.model = CohereModel(name)
-        elif 'llama3' in name or 'mixtral' in name or 'gemma' in name:
-            self.model = GroqModel(name)
-        else:
-            raise RuntimeError(f"Unknown model type for name: {name}")
-        self.model.hparams.update(override_hparams)
+        self.model = _build_model(name)
+        self.model.hparams.update(override_hparams or {})
 
         # Clean up unsupported hparams *after* overrides are applied
-        if isinstance(self.model, OpenAIModel):
+        if _uses_openai_compatible_api(name):
             if 'repeat_penalty' in self.model.hparams:
                 del self.model.hparams['repeat_penalty']
                 logging.debug("Removed 'repeat_penalty' from hparams, reason: unsupported by OpenAIModel")
@@ -145,7 +181,7 @@ class LLM:
 
         response = "Model API request failed"
 
-        def process_request_and_stream(json_arg, overall_timeout=900):
+        def process_request_and_stream(json_arg, overall_timeout=REQUEST_OVERALL_TIMEOUT_SECONDS):
             stream = None
             full_response_content = ""
             log_accumulator = "" # Accumulator for logging
@@ -153,7 +189,7 @@ class LLM:
             chunk_count = 0
             start_time = time.monotonic()
             last_chunk_time = start_time
-            chunk_timeout = 900*2  # Max time between chunks before considering stream dead (30 minutes for slow models)
+            chunk_timeout = STREAM_CHUNK_TIMEOUT_SECONDS
             
             stream = None  # Initialize to prevent UnboundLocalError in finally block
             try:
@@ -255,15 +291,8 @@ class LLM:
             except Exception as e:
                 error_str = str(e)
                 # Re-raise connection/transient errors so the backoff retry loop can handle them
-                if "APIConnectionError" in type(e).__name__ or "ConnectionError" in type(e).__name__:
-                    logging.warning(f"Connection error for {self.name}: {e}")
-                    raise
-                if "RemoteProtocolError" in error_str and "peer closed connection" in error_str:
-                    logging.warning(f"RemoteProtocolError for {self.name}: {e}")
-                    raise
-                # Network timeouts - also worth retrying
-                if "ReadTimeout" in error_str or "timed out" in error_str:
-                    logging.warning(f"Network timeout for {self.name}: {e}")
+                if should_retry_request_error(e):
+                    logging.warning(f"Retryable request error for {self.name}: {e}")
                     raise
 
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
@@ -294,12 +323,15 @@ class LLM:
                 except Exception:
                     pass
 
-        backoff_times = [10, 20, 30, 60, 90, 120, 300]  # New backoff times
-        for i in range(len(backoff_times)):
-            logging.debug(f"Attempt {i+1}/{len(backoff_times)} for model {self.name}")
+        for i in range(len(BACKOFF_TIMES)):
+            logging.debug(f"Attempt {i+1}/{len(BACKOFF_TIMES)} for model {self.name}")
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=3600)
+                    future = executor.submit(
+                        process_request_and_stream,
+                        json_arg=json,
+                        overall_timeout=REQUEST_OVERALL_TIMEOUT_SECONDS,
+                    )
                     response = future.result()
                     if response and response.strip():
                         break  # Got a valid response
@@ -313,8 +345,8 @@ class LLM:
                 logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False)
                 response = f"Model API request failed: {type(e).__name__}"
 
-            if i < len(backoff_times) - 1:  # Don't sleep after the last attempt
-                wait_time = backoff_times[i]
+            if i < len(BACKOFF_TIMES) - 1:  # Don't sleep after the last attempt
+                wait_time = BACKOFF_TIMES[i]
                 logging.info(f"Request failed on attempt {i+1}. Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
 
@@ -333,17 +365,23 @@ class LLM:
 
         return response
 
-#llm = LLM("command")
-#llm = """LLM("gpt-3.5-turbo")"""
-
-# llm = LLM("ollama_ollama_deepseek-coder-v2")
-#llm = LLM("gpt-4-turbo-2024-04-09")
-#llm = LLM("gemini-1.5-pro-preview-0409")
-llm = LLM("o1-mini")
-
-eval_llm = LLM("openai_eval_qwen/qwen3-30b-a3b")
-#eval_llm = LLM("gpt-3.5-turbo", override_hparams={'temperature': 0.1})
-
-# Set to None to skip vision tests, or configure a vision-capable model
+llm = None
+eval_llm = None
 vision_eval_llm = None
-#vision_eval_llm = LLM("openai_gpt-4-vision", override_hparams={'temperature': 0.1})
+
+
+def ensure_default_models(test_model_name=None):
+    global llm, eval_llm, vision_eval_llm
+
+    if test_model_name and (llm is None or llm.original_name != test_model_name):
+        llm = LLM(test_model_name)
+    elif llm is None and DEFAULT_TEST_MODEL:
+        llm = LLM(DEFAULT_TEST_MODEL)
+
+    if eval_llm is None and DEFAULT_EVAL_MODEL:
+        eval_llm = LLM(DEFAULT_EVAL_MODEL)
+
+    if vision_eval_llm is None and DEFAULT_VISION_EVAL_MODEL:
+        vision_eval_llm = LLM(DEFAULT_VISION_EVAL_MODEL)
+
+    return llm, eval_llm, vision_eval_llm

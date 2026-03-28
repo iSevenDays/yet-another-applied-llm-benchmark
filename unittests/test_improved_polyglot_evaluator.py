@@ -6,6 +6,8 @@ sophisticated polyglot attempts and awards appropriate credit.
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 # Import the improved classes using proper imports
 from tests.print_hello_poly import PolyglotAwareEvaluator, CollectPolyglotResults
 from evaluator import PythonRun, RustRun, Env, Reason

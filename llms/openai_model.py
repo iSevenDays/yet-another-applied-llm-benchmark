@@ -7,29 +7,41 @@ from openai import OpenAI
 import json
 from config_loader import load_config
 
+OPENAI_CLIENT_TIMEOUT_SECONDS = 3600
+
 class OpenAIModel:
     def __init__(self, name, config_key='openai'):
         config = load_config()
-        api_key = config['llms'][config_key]['api_key'].strip()
+        provider_config = config.get('llms', {}).get(config_key, {})
+        api_key = (provider_config.get('api_key') or os.getenv('OPENAI_API_KEY') or 'none').strip()
         
-        # Prioritize environment variable, fallback to config.yaml
-        api_base = os.getenv('OPENAI_BASE_URL') or config['llms'][config_key]['api_base']
+        # Prioritize environment variables, fallback to config.yaml
+        # Support both OPENAI_API_BASE (vLLM/common convention) and OPENAI_BASE_URL (OpenAI SDK convention)
+        # For eval endpoint, use OPENAI_EVAL_API_BASE / OPENAI_EVAL_BASE_URL
+        if config_key == 'openai_eval':
+            api_base = (os.getenv('OPENAI_EVAL_API_BASE') or
+                        os.getenv('OPENAI_EVAL_BASE_URL') or
+                        provider_config.get('api_base'))
+        else:
+            api_base = (os.getenv('OPENAI_API_BASE') or
+                        os.getenv('OPENAI_BASE_URL') or
+                        provider_config.get('api_base'))
         
         # Configure client with connection limits to prevent leaks and hanging
         import httpx
         self.client = OpenAI(
             api_key=api_key, 
             base_url=api_base,
-            timeout=2*900.0,  # Set explicit timeout (30 minutes)
+            timeout=float(OPENAI_CLIENT_TIMEOUT_SECONDS),
             max_retries=2,   # Limit retries to prevent hanging
             http_client=httpx.Client(
                 limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
-                timeout=httpx.Timeout(2*900.0, connect=30.0)
+                timeout=httpx.Timeout(float(OPENAI_CLIENT_TIMEOUT_SECONDS), connect=30.0)
             )
         )
         self.name = name
-        self.hparams = config['hparams']
-        self.hparams.update(config['llms'][config_key].get('hparams') or {})
+        self.hparams = config.get('hparams', {}).copy()
+        self.hparams.update(provider_config.get('hparams') or {})
 
     def make_request(self, conversation, add_image=None, max_tokens=None, json=False, stream=False):
         conversation = [{"role": "user" if i%2 == 0 else "assistant", "content": content} for i,content in enumerate(conversation)]

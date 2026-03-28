@@ -7,6 +7,7 @@ Run with: python -m pytest unittests/test_integration_polyglot.py -m integration
 """
 
 import pytest
+import sys
 
 # Use proper imports - pytest handles path resolution
 from evaluator import PythonRun, RustRun, Env

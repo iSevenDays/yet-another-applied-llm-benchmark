@@ -10,10 +10,12 @@ import time
 import logging
 import sys
 import os
+import pytest
 
 from docker_controller import DockerJob
 
 
+@pytest.mark.integration
 class TestDockerJobEnhancements(unittest.TestCase):
     
     @classmethod

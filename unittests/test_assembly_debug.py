@@ -53,13 +53,14 @@ HCF              ; halt – the program has finished
         print(f"Actual:   {actual}")
         print(f"Match: {expected == actual}")
         
-        return expected == actual
+        assert expected == actual
+        return
         
     except Exception as e:
         print(f"EXCEPTION: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise AssertionError(f"Assembly emulator raised an exception: {e}") from e
 
 if __name__ == "__main__":
     test_assembly_squares()

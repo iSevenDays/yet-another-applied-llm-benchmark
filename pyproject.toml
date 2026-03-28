@@ -1,0 +1,44 @@
+[project]
+name = "yet-another-applied-llm-benchmark"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "docker",
+    "numpy",
+    "Pillow",
+    "openai",
+    "markdown",
+    "pygments",
+    "selenium",
+    "psutil",
+    "requests",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.86.0"]
+vertexai = ["google-cloud-aiplatform>=1.71.1"]
+cohere = ["cohere>=5.21.1"]
+gemini = ["google-generativeai"]
+groq = ["groq>=1.1.2"]
+llama = ["llama-cpp-python"]
+all-providers = [
+    "anthropic>=0.86.0",
+    "google-cloud-aiplatform>=1.71.1",
+    "cohere>=5.21.1",
+    "google-generativeai",
+    "groq>=1.1.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-xdist",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: slow integration tests that require Docker and external tooling",
+]

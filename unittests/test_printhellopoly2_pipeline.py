@@ -7,8 +7,11 @@ Following TDD approach to isolate where the execution routing goes wrong.
 
 import sys
 import os
+import pytest
 from evaluator import ExtractCode, PythonRun, RustRun, SubstringEvaluator, Env, Conversation, AndNode
 import docker_controller
+
+pytestmark = pytest.mark.integration
 
 def test_printhellopoly2_pipeline_simulation():
     """Test the exact pipeline used in PrintHelloPoly2 test."""

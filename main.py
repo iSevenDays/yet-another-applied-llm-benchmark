@@ -25,7 +25,6 @@ import pickle
 import subprocess
 import time
 from tqdm import tqdm
-import create_results_html
 import traceback
 import logging
 import docker
@@ -37,7 +36,7 @@ from functools import partial
 
 # Configuration constants
 MAX_FAILURE_REASON_LENGTH = 400
-MAX_WAIT_TIME_SECONDS = 900*2  # 30 minutes
+MAX_WAIT_TIME_SECONDS = 3600
 STATUS_LOG_INTERVAL_SECONDS = 30
 WORKER_LOG_CHUNK_INTERVAL = 500
 STAGE_HANG_THRESHOLD_SECONDS = 600
@@ -147,6 +146,7 @@ def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, 
     devnull = open(os.devnull, 'w')
     test_passed = False
     failure_reason = "Test execution did not yield result"
+    test_start = time.time()
     
     try:
         sys.stdout = devnull
@@ -167,10 +167,12 @@ def _process_test_in_sequential_mode(filename, test_name, module, test_llm, sr, 
         devnull.close()
 
     # Update counters and report results
+    duration_seconds = time.time() - test_start
     if test_passed:
         total_passed[0] += 1
     else:
         total_failed[0] += 1
+    _log_test_outcome(f"{filename}.{test_name}", test_passed, failure_reason, duration_seconds)
     
     total_tests = total_passed[0] + total_failed[0]
     result_str = "PASS" if test_passed else "FAIL"
@@ -267,6 +269,40 @@ def _format_failure_reason(failure_reason, max_length=400):
         reason_str = reason_str[:max_length-3] + "..."
     
     return reason_str
+
+
+def _serialize_failure_reason(failure_reason, depth=0, max_depth=5):
+    if depth >= max_depth:
+        return {"summary": str(failure_reason)[:MAX_FAILURE_REASON_LENGTH]}
+
+    if hasattr(failure_reason, "node") and hasattr(failure_reason, "children"):
+        node = getattr(failure_reason.node, "__name__", failure_reason.node.__class__.__name__)
+        children = failure_reason.children
+        serialized = {
+            "node": node,
+            "summary": _format_failure_reason(failure_reason, MAX_FAILURE_REASON_LENGTH),
+        }
+        if isinstance(children, (list, tuple)):
+            serialized["children"] = [
+                _serialize_failure_reason(child, depth + 1, max_depth)
+                for child in children[:4]
+            ]
+        else:
+            serialized["children"] = [str(children)[:MAX_FAILURE_REASON_LENGTH]]
+        return serialized
+
+    return {"summary": str(failure_reason)[:MAX_FAILURE_REASON_LENGTH]}
+
+
+def _log_test_outcome(test_name, test_passed, failure_reason, duration_seconds):
+    payload = {
+        "test": test_name,
+        "passed": test_passed,
+        "duration_seconds": round(duration_seconds, 3),
+    }
+    if not test_passed:
+        payload["failure"] = _serialize_failure_reason(failure_reason)
+    logging.info("TEST_RESULT_DETAIL: %s", json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def requires_vision_llm(test_node):
@@ -545,6 +581,7 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
                         total_failed[0] += 1
                         
                     sr[test_name] = (test_passed, failure_reason)
+                    _log_test_outcome(test_name, test_passed, failure_reason, duration)
                     
                     result_str = "PASS" if test_passed else "FAIL"
                     pbar.write(f"{result_str}: {test_name}")
@@ -638,6 +675,7 @@ def run_all_tests(test_llm_name, use_cache=True, which_tests=None, parallel_work
     Run every test case in the benchmark, returning a dictionary of the results
     of the format { "test_name": (success, output) }
     """
+    llm.ensure_default_models()
     test_llm = llm.LLM(test_llm_name, use_cache=use_cache)
     print(f'test_llm: {test_llm.name}')
     print(f'eval_llm: {llm.eval_llm.name if llm.eval_llm else None}')
@@ -917,6 +955,7 @@ def main():
                     for k,v in kvs.items():
                         data[model][k] = v
         elif args.run_tests:
+            llm.ensure_default_models()
             if args.eval_model:
                 llm.eval_llm = llm.LLM(args.eval_model)
             tests_subset = None # run all of them
@@ -960,6 +999,7 @@ def main():
             raise RuntimeError("Unreachable code path - invalid execution mode")
 
     if args.generate_report:
+        import create_results_html
         tags, descriptions = get_tags()  # Assuming these functions are defined in your codebase
         create_results_html.generate_report(data, tags, descriptions)
 

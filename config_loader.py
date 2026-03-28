@@ -26,7 +26,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     # Determine config file path
     if config_path is None:
-        config_path = 'config.yaml'
+        config_path = os.getenv('BENCHMARK_CONFIG', 'config.yaml')
     
     # Check if file exists
     if not os.path.exists(config_path):
@@ -54,6 +54,10 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     config.setdefault('hparams', {})
     config.setdefault('llms', {})
     config.setdefault('system_prompt', '')
+    if not isinstance(config['hparams'], dict):
+        raise ValueError("Configuration field 'hparams' must be a dictionary")
+    if not isinstance(config['llms'], dict):
+        raise ValueError("Configuration field 'llms' must be a dictionary")
     
     return config
 

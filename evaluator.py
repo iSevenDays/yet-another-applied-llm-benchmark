@@ -23,6 +23,7 @@ import io
 import docker
 import inspect
 import re
+import unicodedata
 
 import numpy as np
 
@@ -66,6 +67,129 @@ CODE_BLOCK_DELIMITER = "```"
 CODE_EXTRACTION_TIMEOUT = 30
 MAX_ITERATIONS = 100
 SCREENSHOT_DELAY_SECONDS = 2
+
+UNICODE_TEXT_TRANSLATION = str.maketrans({
+    "\u00a0": " ",
+    "\u2009": " ",
+    "\u202f": " ",
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2212": "-",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+})
+
+ASSEMBLY_OPS = {
+    "SET", "ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "NEQ", "LT", "LTE",
+    "GT", "GTE", "INC", "DEC", "JMP", "JT", "JF", "LOAD", "STORE", "HCF",
+}
+
+
+def normalize_text_for_comparison(text):
+    if not isinstance(text, str):
+        return text
+    text = strip_thinking_tokens(text)
+    text = unicodedata.normalize("NFKC", text).translate(UNICODE_TEXT_TRANSLATION)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"[ \t]+", " ", text)
+
+
+def _fenced_code_blocks(text):
+    return [match.group(1).strip("\n") for match in re.finditer(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", text, flags=re.DOTALL)]
+
+
+def _extract_balanced_json_strings(text):
+    decoder = json.JSONDecoder()
+    candidates = []
+    normalized = normalize_text_for_comparison(text)
+    for match in re.finditer(r"[\[{]", normalized):
+        snippet = normalized[match.start():].lstrip()
+        try:
+            parsed, end = decoder.raw_decode(snippet)
+        except json.JSONDecodeError:
+            continue
+        candidates.append(json.dumps(parsed))
+        candidates.append(snippet[:end])
+    return candidates
+
+
+def _looks_like_code_line(line):
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("#", "//", "/*", "*", "*/", "--")):
+        return True
+    if re.match(r"^[A-Za-z_][\w]*:\s*(?:;.*)?$", stripped):
+        return True
+    if re.match(r"^(?:from|import|def|class|return|if|for|while|try|except|fn|let|const|var|public|private|template|SELECT|INSERT|UPDATE|DELETE|CREATE|BEGIN|END|#!/)\b", stripped):
+        return True
+    first_token = stripped.replace(",", " ").split()[0]
+    if first_token.upper() in ASSEMBLY_OPS:
+        return True
+    if any(token in stripped for token in ("{", "}", "();", " = ", "->", "::", "#include", "<html", "</", "println!", "printf(")):
+        return True
+    return False
+
+
+def _looks_like_prose_line(line):
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _looks_like_code_line(stripped):
+        return False
+    words = re.findall(r"[A-Za-z]{3,}", stripped)
+    return len(words) >= 4 and stripped.endswith((".", ":"))
+
+
+def _extract_code_candidates(text):
+    normalized = normalize_text_for_comparison(text)
+    fenced_blocks = _fenced_code_blocks(normalized)
+    candidates = []
+    candidates.extend(block for block in fenced_blocks if block.strip())
+
+    lines = normalized.splitlines()
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if _looks_like_code_line(line):
+            start_idx = idx
+            break
+
+    if start_idx is not None:
+        candidate_lines = []
+        prose_streak = 0
+        for line in lines[start_idx:]:
+            if not line.strip():
+                candidate_lines.append(line)
+                prose_streak = 0
+                continue
+            if _looks_like_prose_line(line):
+                prose_streak += 1
+                if prose_streak >= 2:
+                    break
+                continue
+            prose_streak = 0
+            candidate_lines.append(line)
+
+        candidate = "\n".join(candidate_lines).strip("\n")
+        if candidate:
+            candidates.append(candidate)
+
+    raw = normalized.strip()
+    if raw and (fenced_blocks or start_idx is not None):
+        candidates.append(raw)
+
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            deduped.append(candidate)
+            seen.add(candidate)
+    return deduped
 
 class Env:
     """
@@ -451,10 +575,12 @@ class SubstringEvaluator(Node):
 
     def __call__(self, output):
         try:
+            output_normalized = normalize_text_for_comparison(output)
+            substr_normalized = normalize_text_for_comparison(self.substr)
             if self.lower:
-                cond = self.substr.lower() in output.lower()
+                cond = substr_normalized.lower() in output_normalized.lower()
             else:
-                cond = self.substr in output
+                cond = self.substr in output or substr_normalized in output_normalized
         except Exception as exc:
             print(f'SubstringEvaluator error: {exc}, substr: {self.substr}, output type: {type(output)}')
             cond = False
@@ -475,7 +601,8 @@ class RegexEvaluator(Node):
         import re
 
         flags = re.IGNORECASE if self.ignore_case else 0
-        match = re.search(self.pattern, output, flags)
+        output_normalized = normalize_text_for_comparison(output)
+        match = re.search(self.pattern, output, flags) or re.search(self.pattern, output_normalized, flags)
 
         if match:
             yield True, Reason(type(self), [self.pattern, True, output])
@@ -507,6 +634,8 @@ class EqualEvaluator(Node):
     def __call__(self, output):
         """Check if output exactly matches the goal."""
         matches = (self.goal == output)
+        if not matches and isinstance(self.goal, str) and isinstance(output, str):
+            matches = normalize_text_for_comparison(self.goal).strip() == normalize_text_for_comparison(output).strip()
         yield matches, Reason(type(self), [self.goal, matches, output])
 
 class UntilDone(Node):
@@ -550,29 +679,32 @@ class ExtractJSON(Node):
 
     def try_extract(self, output):
         """Extract JSON from code blocks or raw text."""
-        output = output.replace("```json", CODE_BLOCK_DELIMITER)
-        if CODE_BLOCK_DELIMITER in output:
-            # Extract first code block
-            yield output.split(CODE_BLOCK_DELIMITER)[1]
-            # Extract all odd-indexed parts (content between ``` pairs)
-            all_blocks = "\n".join(output.split(CODE_BLOCK_DELIMITER)[1::2])
-            yield all_blocks
-        else:
-            yield output
+        normalized = normalize_text_for_comparison(output)
+        for candidate in _extract_balanced_json_strings(normalized):
+            yield candidate
+        for block in _fenced_code_blocks(normalized):
+            yield block
+        if normalized:
+            yield normalized
         
     def __call__(self, orig_output):
-        if orig_output.count(CODE_BLOCK_DELIMITER) == 2:
-            for maybe in self.try_extract(orig_output):
+        candidates = list(self.try_extract(orig_output))
+        for maybe in candidates:
+            try:
+                json.loads(maybe)
                 yield maybe, Reason(type(self), [maybe])
-        else:
-            prompt = (
-                "Take the below answer to my question asking for a JSON output and just return "
-                "the JSON object directly, with no other description, so I can copy it into an "
-                "editor directly:\n" + orig_output
-            )
-            output = self.llm(prompt)
-            for maybe in self.try_extract(output):
-                yield maybe, Reason(type(self), [maybe])
+                return
+            except json.JSONDecodeError:
+                continue
+
+        prompt = (
+            "Take the below answer to my question asking for a JSON output and just return "
+            "the JSON object directly, with no other description, so I can copy it into an "
+            "editor directly:\n" + orig_output
+        )
+        output = self.llm(prompt)
+        for maybe in self.try_extract(output):
+            yield maybe, Reason(type(self), [maybe])
 
 class ExtractCode(Node):
     """
@@ -590,20 +722,17 @@ class ExtractCode(Node):
 
     def try_extract(self, output):
         """Extract code from markdown blocks or raw text."""
-        output = re.sub(r'```[a-z]*', CODE_BLOCK_DELIMITER, output)
-        if CODE_BLOCK_DELIMITER in output:
-            ans = output.split(CODE_BLOCK_DELIMITER)[1] + "\n" + self.postfix
-        else:
-            ans = output + "\n" + self.postfix
-        yield ans
+        for candidate in _extract_code_candidates(output):
+            yield candidate + ("\n" + self.postfix if self.postfix else "")
         
     def __call__(self, orig_output):
         import logging
         logging.debug(f"ExtractCode input ({len(orig_output)} chars): {orig_output[:200]}{'...' if len(orig_output) > 200 else ''}")
         
-        if orig_output.count("```") == 2:
-            logging.debug("ExtractCode: Found exactly 2 code blocks, extracting directly")
-            for maybe in self.try_extract(orig_output):
+        immediate_candidates = list(self.try_extract(orig_output))
+        if immediate_candidates:
+            logging.debug("ExtractCode: Using direct extraction candidates before eval_llm fallback")
+            for maybe in immediate_candidates:
                 yield maybe, Reason(type(self), maybe)
             return
 
@@ -1055,6 +1184,8 @@ def run_test(test):
     A helper function to run just one specific test case.
     Used to debug tests by running each file directly.
     """
+    import llm as llm_module
+    llm_module.ensure_default_models()
     from llm import llm, eval_llm, vision_eval_llm
     env = Env()
     test.setup(env, Conversation(llm), llm, eval_llm, vision_eval_llm)
@@ -1140,4 +1271,3 @@ if (answer != expected) {{
     return "\n".join(qs), "All tests passed"
         
     
-
