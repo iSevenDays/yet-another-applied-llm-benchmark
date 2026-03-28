@@ -29,42 +29,7 @@ conda activate yetanother && timeout 10s python main.py --model openai_Qwen3-235
 
 ### For Development Testing
 
-**IMPORTANT: Use appropriate test categories for different development needs**
-
-See [TESTS.md](./TESTS.md) for complete test execution guide.
-
-#### Fast Development Testing (5-10 seconds)
-**Use logic-only unit tests for rapid feedback:**
-```bash
-conda activate yetanother
-python -m pytest unittests/test_polyglot_logic_unit.py unittests/test_strip_think.py unittests/test_cache.py -v
-```
-
-#### Integration Testing (2+ minutes, requires Docker)
-**Use integration tests only when verifying Docker-based execution:**
-```bash
-conda activate yetanother
-python -m pytest unittests/test_integration_polyglot.py -m integration --tb=short
-```
-
-#### All Unit Tests (may timeout due to Docker tests)
-```bash
-conda activate yetanother
-timeout 300 python -m pytest unittests/ -v --tb=short -x
-```
-
-**Test Categories:**
-- **🚀 Fast Tests**: Logic-only, no Docker - use for development
-- **🐳 Docker Tests**: Integration tests requiring containers - use sparingly
-
-### Production Test Execution
-
-When running full benchmark evaluation:
-
-```bash
-conda activate yetanother
-python main.py --model gpt-3.5-turbo --run-tests --generate-report
-```
+See [TESTS.md](./TESTS.md) for the complete test execution guide, including fast unit tests, Docker integration tests, and CI/CD recommendations.
 
 ## Visual Test Handling
 

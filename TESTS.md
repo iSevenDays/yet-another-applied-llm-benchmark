@@ -1,62 +1,6 @@
-# Test Documentation
+# Test Execution Guide
 
-## Cache System Issue Resolution
-
-### Problem
-High cache miss rates (79%) when restarting benchmark runs, despite having cached results available.
-
-### Root Cause
-Inconsistent cache key generation patterns created structural mismatches:
-- **Legacy cache entries**: 2-component keys `(conversation, hparams)`
-- **Current benchmark calls**: 3-component keys `(conversation, max_tokens, hparams)`
-- **Vision test calls**: Mixed patterns with explicit `max_tokens=512`
-
-### Solution
-Implemented parameter normalization in `llm_cache.py`:
-```python
-# Before: Inconsistent key structures
-key = (conversation, max_tokens, hparams)  # Some calls
-key = (conversation, hparams)              # Other calls
-
-# After: Normalized structure
-key = (conversation, normalized_hparams)   # All calls
-```
-
-### Key Changes
-1. **Parameter Normalization**: All `max_tokens` values merged into `hparams` consistently
-2. **Backward Compatibility**: Generated keys match legacy 2-component structure
-3. **Explicit Precedence**: Direct parameters override `hparams` values
-4. **Test Coverage**: Added backward compatibility tests to prevent regression
-
-### Verification
-```bash
-# All calling patterns now generate identical keys:
-cache.get_cache_key(conv, hparams={'max_tokens': 4096})                    # Legacy
-cache.get_cache_key(conv, max_tokens=4096, hparams={'max_tokens': 4096})   # Current  
-cache.get_cache_key(conv, max_tokens=4096)                                 # Vision
-
-# Result: Same 2-component key structure for all
-```
-
-### Impact
-- ✅ **Cache hit rate**: Expected to reach ~99% on restarts
-- ✅ **Backward compatibility**: Works with existing 281 cache entries
-- ✅ **Future-proof**: Prevents similar issues from parameter inconsistencies
-- ✅ **Test coverage**: 12/12 unit tests passing including new compatibility tests
-
-### Files Modified
-- `llm_cache.py`: Parameter normalization logic
-- `unittests/test_cache.py`: Backward compatibility test coverage
-
-### Testing
-```bash
-conda activate yetanother
-python -m pytest unittests/test_cache.py -v
-```
-
-## Test Execution Guide
-
-### Test Categories
+## Test Categories
 
 This project has two main categories of tests with very different execution characteristics:
 
@@ -93,34 +37,15 @@ conda activate yetanother
 python -m pytest unittests/test_integration_polyglot.py -m integration --tb=short
 ```
 
-### Execution Recommendations
+## Execution Recommendations
 
-#### For Development and Quick Validation
-**Use fast unit tests** - they verify core logic without Docker overhead:
-```bash
-conda activate yetanother
-python -m pytest unittests/test_polyglot_logic_unit.py unittests/test_strip_think.py -v
-```
+| Scenario | Command | Time |
+|---|---|---|
+| Development / quick validation | `python -m pytest unittests/test_polyglot_logic_unit.py unittests/test_strip_think.py unittests/test_error_reporting.py unittests/test_assembly_debug.py unittests/test_cache.py -v` | 5-10s |
+| Docker integration testing | `python -m pytest unittests/test_integration_polyglot.py -m integration --tb=short` | 2+ min |
+| Comprehensive (CI/CD) | `timeout 300 python -m pytest unittests/ -v --tb=short -x` | up to 5 min |
 
-#### For Full Integration Testing
-**Use integration tests** only when you need to verify Docker-based execution:
-```bash
-conda activate yetanother
-python -m pytest unittests/test_integration_polyglot.py -m integration --tb=short
-```
-
-#### For Comprehensive Testing (CI/CD)
-Run all tests with timeout protection:
-```bash
-conda activate yetanother
-timeout 300 python -m pytest unittests/ -v --tb=short -x
-```
-
-### Test Timeout Behavior
-
-- **Fast tests**: Complete in 5-10 seconds
-- **Docker tests**: May timeout after 2 minutes due to container startup overhead
-- **Recommendation**: Separate fast tests from integration tests in your workflow
+> **Note:** Always run `conda activate yetanother` first. Separate fast tests from Docker tests in your workflow to avoid unnecessary delays.
 
 ### Adding New Tests
 

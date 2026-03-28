@@ -261,8 +261,10 @@ Running the benchmark with Ollama. Prefix models with `ollama_`.
 
 ```bash
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model ollama_llama3.1:latest
+```
 
 Running the benchmark with OpenAI-like endpoint. Prefix models with `openai_`.
+
 ```bash
 OPENAI_API_BASE=http://localhost:11434 python main.py --run-tests --test print_hello --model openai_llama3.1:latest
 ```
@@ -318,48 +320,27 @@ If you'd like to test a new LLM, you'll just need to add a new file to llms/[mod
 which implements an inference function. From there, modify [llm.py](llm.py) to include the
 appropriate model.
 
-## Chaning of the System Prompt for Ollama
+## Changing the System Prompt for Ollama
 
 Set OLLAMA_SYSTEM_PROMPT or config.yaml "system_prompt" variable.
 
 ## Adding new test cases
 
-As discussed above, I've built a small dataflow DSL to implement test cases.
-This should let anyone add new test cases fairly easily.
-Let me repeat the initial test case examples in full:
+Test cases use the dataflow DSL described in the introduction above. The `>>` operator chains
+stages sequentially (like a bash `|` pipe). Each stage processes the previous output:
 
 ```python
 TestHelloWorld = 'Print "hello world" in python' >> LLMRun() >> \
       ExtractCode() >> PythonRun() >> SubstringEvaluator("hello world")
 ```
 
-Recall that you should read the `>>` operator as "and then do".
-If you're a bash person, it's like a `|` pipe.
-If you're a haskel person, it's like the `$` operator.
+1. `LLMRun()` sends the prompt to the model under test
+2. `ExtractCode()` extracts the first code block from the response
+3. `PythonRun()` executes the code in a Docker container
+4. `SubstringEvaluator("hello world")` checks if stdout contains the expected output
 
-- We start by running the LLM we want to test with the prompt: Print "hello world" in python.
-- The model will probably give some code, but might also give an explanation or start by saying "Sure! I can answer your question." So we take whatever output came out of the model and pass it through a function to just extract the first code block.
-- We then actually go and run this python code, whatever it is. To be somewhat safe we do this by spawning a new docker env and run the code there.
-- And finally, we verify that the code was correct, and the output of the python contains a substring of "hello world".
-
-This dataflow pipeline also lets you do more complex verification.
-Below is the same example as from the top where I evaluate a model's
-ability to understand how to draw .bmp images.
-
-```python
-TestFlagDraw = "Write a C program that draws an american flag to stdout as a bmp." >> \
-       ExtractCode() >> CRun() >> LLMVisionRun("What flag is shown in this image?") >> \
-          (SubstringEvaluator("United States") | \
-           SubstringEvaluator("USA") | \
-           SubstringEvaluator("America"))
-```
-
-Here, after asking the model to draw the flag and running the resulting C code,
-I evaluate the model by asking *another* model what flag has been drawn,
-and checking if it says something like the US flag.
-Is this a perfect check? No.
-But verification is usually easier than generation, and so it's probably a good
-enough approximation of what I want.
+For more complex evaluation, chain additional stages or use logical operators (`|`, `&`, `~`).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full list of available DSL nodes.
 
 # Contributing
 
