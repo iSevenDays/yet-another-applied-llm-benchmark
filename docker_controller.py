@@ -44,6 +44,7 @@ import atexit
 I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKING_THEM_HALT_AND_CATCH_FIRE = False
 
 BACKEND = load_config()['container']
+DOCKER_EXEC_TIMEOUT = 50
 
 # Container Pool for Performance Optimization
 class ContainerPool:
@@ -64,13 +65,25 @@ class ContainerPool:
         
     def _create_container(self):
         """Create a new container using existing backend logic."""
+        build_path = os.path.dirname(os.path.abspath(__file__))
         if BACKEND == "docker":
             import docker
             docker_client = docker.from_env()
+            try:
+                docker_client.images.get("llm-benchmark-image")
+            except docker.errors.ImageNotFound:
+                logging.info("ContainerPool: llm-benchmark-image not found locally, building from Dockerfile...")
+                docker_client.images.build(path=build_path, tag="llm-benchmark-image")
             container = docker_client.containers.run("llm-benchmark-image", detach=True, tty=True)
             return docker_client, container
         else:  # podman
-            result = subprocess.run(["podman", "run", "-d", "-t", "llm-benchmark-image"], 
+            result = subprocess.run(["podman", "images", "-q", "llm-benchmark-image"],
+                                  capture_output=True, text=True)
+            if not result.stdout.strip():
+                logging.info("ContainerPool: llm-benchmark-image not found locally, building from Dockerfile...")
+                subprocess.run(["podman", "build", "-t", "llm-benchmark-image", build_path],
+                              check=True)
+            result = subprocess.run(["podman", "run", "-d", "-t", "llm-benchmark-image"],
                                   capture_output=True, text=True, check=True)
             container_id = result.stdout.strip()
             return "PODMAN_CLIENT", container_id
@@ -311,83 +324,32 @@ class DockerJob:
     def __init__(self, container_id, eos_string):
         self.eos_string = eos_string
         self.container_id = container_id
+        self._sqlite_mode = False  # Set during first call if command is sqlite3
 
         if BACKEND == "docker":
             cmd = f"docker exec -i {container_id} /bin/bash"
-            print("Running", cmd)
+            logging.debug("DockerJob: Running %s", cmd)
         else:
             cmd = f"podman exec -i {container_id} /bin/bash"
-        
+
         self.process = subprocess.Popen(cmd,
                                         shell=True,
                                         stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE,
                                         text=True)
-        
-        self.master_fd = self.process.stdout.fileno()  # If you need a file descriptor for reading output
+
+        self.master_fd = self.process.stdout.fileno()
         
     @staticmethod
     def remove_ansi(text):
         ansi_escape =re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
         return ansi_escape.sub('', text)
         
-    def _detect_program_ready(self, cmd, total_output):
-        """
-        Smart detection for interactive program readiness.
-        
-        Some programs (like SQLite) don't emit prompts when using pipes,
-        but are fully functional. This method detects readiness using
-        program-specific strategies instead of relying only on prompt strings.
-        """
-        # For SQLite: Use probe-based detection
-        if 'sqlite3' in cmd.lower():
-            logging.debug(f"DockerJob: Detected SQLite, using probe-based readiness detection")
-            return self._probe_sqlite_ready()
-        
-        # For other programs: Fall back to original EOS detection
-        if self.eos_string in total_output:
-            logging.debug(f"DockerJob: Found EOS string '{self.eos_string}' in output")
-            return True
-            
-        return False
-        
-    def _probe_sqlite_ready(self):
-        """
-        Test if SQLite is ready by sending a probe command and checking response.
-        
-        SQLite doesn't show 'sqlite>' prompt with pipes, but responds to commands.
-        We send '.help' and look for characteristic SQLite help output.
-        """
-        try:
-            logging.debug("DockerJob: Probing SQLite readiness with .help command")
-            
-            # Send probe command
-            self.process.stdin.write('.help\n')
-            self.process.stdin.flush()
-            
-            # Wait for response with timeout using non-blocking read
-            ready, _, _ = select.select([self.master_fd], [], [], 3)
-            if ready:
-                # Non-blocking read to avoid hanging
-                import os
-                response = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
-                logging.debug(f"DockerJob: SQLite probe response: {repr(response[:100])}")
-                
-                # Look for characteristic SQLite help output
-                if '.archive' in response or '.backup' in response or '.help' in response:
-                    logging.info("DockerJob: SQLite is ready and responsive")
-                    return True
-                else:
-                    logging.debug(f"DockerJob: SQLite responded but no help output: {repr(response[:50])}")
-            else:
-                logging.debug("DockerJob: SQLite probe timed out - trying without probe")
-                
-        except Exception as e:
-            logging.debug(f"DockerJob: SQLite probe failed: {e}")
-            
-        return False
-        
+    def _is_sqlite_session(self):
+        """Check if this DockerJob is running SQLite."""
+        return self._sqlite_mode
+
     def _cleanup_process(self):
         """Clean up any hanging processes in the container."""
         try:
@@ -401,136 +363,154 @@ class DockerJob:
         except Exception as e:
             logging.debug(f"DockerJob: Process cleanup attempt: {e}")
 
-    def __call__(self, cmd):
-        # Check if process is still alive
-        if self.process.poll() is not None:
-            print(f"Process has terminated with return code: {self.process.returncode}")
-            return f"Process terminated (exit code: {self.process.returncode})"
-            
-        # Send the command through the PTY
-        print("GO", self.process.stdin)
+    def _send_command(self, cmd):
+        """Send a command string to the process stdin. Returns error string or None."""
+        if not isinstance(cmd, str):
+            cmd = str(cmd)
+        cmd = cmd.strip()
+        command_to_send = cmd + "\n"
+
+        if self.process.stdin.closed:
+            logging.warning("DockerJob: Process stdin is closed")
+            return "Process stdin is closed"
+
         try:
-            # Ensure cmd is a string and properly formatted
-            if not isinstance(cmd, str):
-                cmd = str(cmd)
-            
-            # Clean up the command - remove any problematic characters
-            cmd = cmd.strip()
-            if not cmd:
-                cmd = ""  # Empty command
-                
-            command_to_send = cmd + "\n"
-            
-            # Check if stdin is still open
-            if self.process.stdin.closed:
-                print("Process stdin is closed")
-                return "Process stdin is closed"
-                
             self.process.stdin.write(command_to_send)
             self.process.stdin.flush()
-            print(f"Sent command: {repr(command_to_send)}")
+            logging.debug("DockerJob: Sent command: %s", repr(command_to_send))
         except BrokenPipeError:
-            print("Broken pipe - process may have terminated")
+            logging.warning("DockerJob: Broken pipe - process may have terminated")
             return "Broken pipe - process may have terminated"
         except Exception as e:
-            print(f"Process communication failed: {e}")
+            logging.error("DockerJob: Process communication failed: %s", e)
             return f"Process communication failed: {e}"
+        return None
 
-        # Read the output with smart detection for program readiness
+    def _read_until_idle(self, timeout_per_read, max_idle_rounds):
+        """Read output until no data arrives for max_idle_rounds consecutive timeouts."""
         output = []
-        timeout_count = 0
-        
-        # Adaptive timeout settings based on command type
-        if 'sqlite3' in cmd.lower():
-            max_timeouts = 2  # SQLite should respond quickly to probe
-            timeout_duration = 4  # Shorter timeouts for probe-based detection
-            logging.debug("DockerJob: Using SQLite-optimized timeouts")
-        else:
-            max_timeouts = 3  # Standard timeout for other programs
-            timeout_duration = 10  # Standard timeout duration
-            
-        total_output = ""  # Track accumulated output for detection
-        program_ready = False
-        
-        # First, try smart detection immediately for programs that might be ready
-        if 'sqlite3' in cmd.lower():
-            # Give SQLite a moment to start, then test readiness
-            import time
-            time.sleep(0.5)
-            if self._detect_program_ready(cmd, total_output):
-                program_ready = True
-                logging.info("DockerJob: Program detected as ready via smart detection")
-        
-        while not program_ready:
-            ready, _, _ = select.select([self.master_fd], [], [], timeout_duration)
+        idle_count = 0
+
+        while idle_count < max_idle_rounds:
+            ready, _, _ = select.select([self.master_fd], [], [], timeout_per_read)
             if ready:
-                timeout_count = 0  # Reset timeout counter on successful read
+                idle_count = 0
                 try:
-                    # Use non-blocking read to prevent hangs
-                    import os
-                    line = os.read(self.master_fd, 128).decode('utf-8', errors='ignore')
-                    if line:
-                        output.append(line)
-                        total_output += line
-                        logging.debug(f"DockerJob received chunk ({len(line)} chars): {repr(line[:50])}")
-                        
-                        # Check if program is ready using smart detection
-                        if self._detect_program_ready(cmd, total_output):
-                            logging.debug("DockerJob: Program ready detected")
-                            program_ready = True
-                            break
+                    chunk = os.read(self.master_fd, 4096).decode('utf-8', errors='ignore')
+                    if chunk:
+                        output.append(chunk)
+                        logging.debug(f"DockerJob read {len(chunk)} chars")
                     else:
-                        # Empty read indicates end of stream
-                        logging.debug("DockerJob: Empty read - end of stream")
-                        break
+                        break  # EOF
                 except (OSError, ValueError) as e:
-                    logging.error(f"DockerJob error reading from process stdout: {e}")
+                    logging.error(f"DockerJob read error: {e}")
                     break
             else:
-                # Timeout occurred
-                timeout_count += 1
-                logging.debug(f"DockerJob accumulated output so far ({len(total_output)} chars): {repr(total_output[:100])}")
-                
-                # For interactive programs, try smart detection on timeout
-                if self._detect_program_ready(cmd, total_output):
-                    logging.info("DockerJob: Program ready detected after timeout")
-                    program_ready = True
+                idle_count += 1
+
+        return ''.join(output)
+
+    def __call__(self, cmd):
+        if self.process.poll() is not None:
+            logging.warning("DockerJob: Process terminated with return code: %s", self.process.returncode)
+            return f"Process terminated (exit code: {self.process.returncode})"
+
+        # Detect if this is the initial SQLite startup command
+        is_startup = 'sqlite3' in cmd.lower()
+        if is_startup:
+            self._sqlite_mode = True
+
+        err = self._send_command(cmd)
+        if err:
+            return err
+
+        if is_startup:
+            # SQLite startup: wait briefly for it to initialize, drain any banner output.
+            # SQLite in pipe mode doesn't show a prompt, so we just wait until idle.
+            import time
+            time.sleep(0.5)
+            startup_output = self._read_until_idle(timeout_per_read=1.0, max_idle_rounds=2)
+            logging.debug("DockerJob: SQLite startup output: %s", repr(startup_output[:200]))
+            return self.remove_ansi(startup_output)
+
+        if self._sqlite_mode:
+            # Subsequent SQL commands: SQLite executes instantly, read with short timeouts
+            output = self._read_until_idle(timeout_per_read=2.0, max_idle_rounds=2)
+            return self.remove_ansi(output)
+
+        # Non-SQLite programs: use EOS string detection with standard timeouts
+        output = []
+        total_output = ""
+        timeout_count = 0
+        max_timeouts = 3
+        timeout_duration = 10
+
+        while True:
+            ready, _, _ = select.select([self.master_fd], [], [], timeout_duration)
+            if ready:
+                timeout_count = 0
+                try:
+                    chunk = os.read(self.master_fd, 4096).decode('utf-8', errors='ignore')
+                    if chunk:
+                        output.append(chunk)
+                        total_output += chunk
+                        if self.eos_string in total_output:
+                            logging.debug("DockerJob: Found EOS string")
+                            break
+                    else:
+                        break
+                except (OSError, ValueError) as e:
+                    logging.error(f"DockerJob read error: {e}")
                     break
-                
+            else:
+                timeout_count += 1
                 if timeout_count >= max_timeouts:
-                    logging.warning(f"DockerJob timeout - no response after {max_timeouts} attempts ({timeout_duration}s each)")
-                    logging.warning(f"DockerJob expected EOS: {repr(self.eos_string)}, got: {repr(total_output)}")
-                    
-                    # Clean up any hanging processes
+                    logging.warning(f"DockerJob timeout after {max_timeouts} x {timeout_duration}s")
                     self._cleanup_process()
                     break
-                else:
-                    logging.debug(f"DockerJob timeout #{timeout_count} - retrying...")
-                    continue
+
+        result = ''.join(output)
+        return self.remove_ansi(result)
 
 
-        output = ''.join(output)
-        output = self.remove_ansi(output)
-        print("Output:", repr(output))
-        return output
+def _save_alarm_state():
+    """Save current SIGALRM state for nesting support in parallel mode."""
+    remaining = signal.alarm(0)
+    handler = signal.getsignal(signal.SIGALRM)
+    return (remaining, handler, time.time())
+
+
+def _restore_alarm_state(state):
+    """Restore previously saved SIGALRM state, adjusting for elapsed time."""
+    prev_remaining, prev_handler, start_time = state
+    if prev_handler not in (signal.SIG_DFL, signal.SIG_IGN, None):
+        signal.signal(signal.SIGALRM, prev_handler)
+        if prev_remaining > 0:
+            elapsed = int(time.time() - start_time)
+            signal.alarm(max(1, prev_remaining - elapsed))
 
 
 def invoke_docker(env, files, run_cmd, out_bytes=False):
     if env.docker is None:
         setup_docker(env)
 
+    # Save previous alarm state to support nesting with worker-level timeouts
+    alarm_state = _save_alarm_state()
+    prev_remaining = alarm_state[0]
+    effective_timeout = min(DOCKER_EXEC_TIMEOUT, prev_remaining) if prev_remaining > 0 else DOCKER_EXEC_TIMEOUT
+
     def raise_timeout(signum, frame):
         raise TimeoutError
     signal.signal(signal.SIGALRM, raise_timeout)
-    signal.alarm(50)
-    
+    signal.alarm(effective_timeout)
+
     try:
-        # Function call that might take too long
         out = safe_run(env.docker, env.container, files, run_cmd)
     except TimeoutError:
         out = b"Timeout: function took too long to complete"
-
-    signal.alarm(0) 
+    finally:
+        signal.alarm(0)
+        _restore_alarm_state(alarm_state)
 
     if out_bytes:
         return out
@@ -553,35 +533,43 @@ if I_HAVE_BLIND_FAITH_IN_LLMS_AND_AM_OKAY_WITH_THEM_BRICKING_MY_MACHINE_OR_MAKIN
     def invoke_docker(env, files, run_cmd, out_bytes=False):
         if env.docker is None:
             setup_docker(env)
-    
+
+        # Save previous alarm state to support nesting with worker-level timeouts
+        alarm_state = _save_alarm_state()
+        prev_remaining = alarm_state[0]
+        effective_timeout = min(DOCKER_EXEC_TIMEOUT, prev_remaining) if prev_remaining > 0 else DOCKER_EXEC_TIMEOUT
+
         def raise_timeout(signum, frame):
             raise TimeoutError
         signal.signal(signal.SIGALRM, raise_timeout)
-        signal.alarm(50)
-        
+        signal.alarm(effective_timeout)
+
+        timed_out = False
         try:
-            # Function call that might take too long
             for file_name, file_content in files.items():
                 with open("/tmp/fakedocker_%d/%s"%(env.fake_docker_id, file_name), "wb") as f:
                     f.write(file_content)
             proc = subprocess.run(run_cmd, cwd="/tmp/fakedocker_%d"%env.fake_docker_id, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except TimeoutError:
+            timed_out = True
+        finally:
+            signal.alarm(0)
+            _restore_alarm_state(alarm_state)
+
+        if timed_out:
             if out_bytes:
                 return b"Timeout: function took too long to complete"
             else:
                 return "Timeout: function took too long to complete"
-
-        signal.alarm(0) 
-    
 
         if out_bytes:
             return proc.stdout + proc.stderr
         else:
             stdout = proc.stdout.decode("utf-8")
             stderr = proc.stderr.decode("utf-8")
-            
+
             # Replace /fakedocker_[0-9]*/ with /fakedocker/
             stdout = re.sub(r'/fakedocker_[0-9]*/', '/fakedocker/', stdout)
             stderr = re.sub(r'/fakedocker_[0-9]*/', '/fakedocker/', stderr)
-        
+
             return stdout + stderr

@@ -1,31 +1,12 @@
 from evaluator import *
+from pathlib import Path
 
 DESCRIPTION = "Expert-level debugging test requiring reverse-engineering of regex bugs and patch generation"
 
 TAGS = ['expert', 'debugging', 'regex', 'patch', 'integration']
 
-code = """import re
-
-class Tokenizer:
-    def __init__(self, input_str):
-        '''
-        input_str: a string of digits and operators
-        '''
-        self.position = 0
-        self.tokens = re.findall(r'\d+|(\+|\-|\*|/|sin|cos|\(|\))', input_str)
-
-    def get_next_token(self):
-        if self.position >= len(self.tokens):
-            return None
-        token = self.tokens[self.position]
-        self.position += 1
-        return token
-
-    def peek_next_token(self):
-        if self.position >= len(self.tokens):
-            return None
-        return self.tokens[self.position]
-"""
+_PROMPTS = Path(__file__).parent / 'prompts'
+code = (_PROMPTS / 'tokenizer_buggy_code.py').read_text()
 
 question = f"""
 Write a .patch file to stdout that will fix the bug in this tokenizer. Still keep the new file name the same after patching.
@@ -43,6 +24,9 @@ Here is the entirety of run_tokenizer.py:
 ```
 """
 
+# setup_fn uses inspect.getsource() → runs in Docker, so code must be inline.
+# Backslashes are double-escaped: Python host parses \\d → \d in source,
+# inspect.getsource returns raw source text, Docker Python re-parses \\d → \d.
 def setup_fn():
     code = """import re
 
@@ -52,7 +36,7 @@ class Tokenizer:
         input_str: a string of digits and operators
         '''
         self.position = 0
-        self.tokens = re.findall(r'\d+|(\+|\-|\*|/|sin|cos|\(|\))', input_str)
+        self.tokens = re.findall(r'\\d+|(\\+|\\-|\\*|/|sin|cos|\\(|\\))', input_str)
 
     def get_next_token(self):
         if self.position >= len(self.tokens):
@@ -85,12 +69,12 @@ TestFixPatch = Setup(setup_fn) >> question >> LLMRun() >> ExtractCode(manual="Ta
 
 # Guided variant with clear problem statement
 question_guided = f"""
-This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5", 
+This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5",
 it currently produces: ['cos', '(', '', ')', '+', 'sin', '(', '', ')', '*', '']
 but should produce: ['cos', '(', '1', ')', '+', 'sin', '(', '23', ')', '*', '5']
 
-The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()` 
-in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups 
+The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()`
+in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups
 return empty strings.
 
 Write a .patch file that fixes this regex bug by removing the unnecessary capturing group.
@@ -98,10 +82,10 @@ Write a .patch file that fixes this regex bug by removing the unnecessary captur
 The patch should be in unified diff format:
 ```
 --- filename.py
-+++ filename.py  
++++ filename.py
 @@ -line,count +line,count @@
  context line
--old line  
+-old line
 +new line
 ```
 
@@ -117,9 +101,9 @@ def check_guided():
     result = os.system("patch < fix.patch")
     if result != 0:
         return False, "Patch application failed - check patch format"
-        
+
     time.sleep(.5)
-    
+
     try:
         import run_tokenizer
         actual = run_tokenizer.Tokenizer("cos(1)+sin(23)*5").tokens

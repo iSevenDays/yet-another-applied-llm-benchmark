@@ -40,7 +40,7 @@ MAX_FAILURE_REASON_LENGTH = 400
 MAX_WAIT_TIME_SECONDS = 900*2  # 30 minutes
 STATUS_LOG_INTERVAL_SECONDS = 30
 WORKER_LOG_CHUNK_INTERVAL = 500
-STAGE_HANG_THRESHOLD_SECONDS = 120
+STAGE_HANG_THRESHOLD_SECONDS = 600
 DEFAULT_MODELS = [
     "gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", 
     "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", 
@@ -220,6 +220,7 @@ def _setup_worker_logging():
             # Generate timestamp-based filename
             timestamp = time.strftime('%Y-%m-%d-%H-%M-%S')
             worker_log_file = f'logs/debug_stream_worker_{timestamp}.log'
+            os.makedirs('logs', exist_ok=True)
             file_handler = logging.FileHandler(worker_log_file, mode='a')
             file_handler.setLevel(logging.DEBUG)
             # Concise format: shortened timestamp, abbreviated level, abbreviated function name
@@ -301,7 +302,8 @@ def run_test_with_name(test_data):
     import time
     import os
     import logging
-    
+    import signal
+
     start_time = time.time()
     pid = os.getpid()
     
@@ -317,7 +319,14 @@ def run_test_with_name(test_data):
         logging.debug(f"WORKER_TRACE[{pid}]: Setting up worker logging")
         _setup_worker_logging()
         logging.debug(f"WORKER_TRACE[{pid}]: Worker logging setup complete")
-        
+
+        # Set per-test timeout — primary safeguard against hung tests in parallel mode.
+        # invoke_docker saves/restores this alarm, so nesting is safe.
+        def _worker_timeout_handler(signum, frame):
+            raise TimeoutError(f"Test exceeded {MAX_WAIT_TIME_SECONDS}s time limit")
+        signal.signal(signal.SIGALRM, _worker_timeout_handler)
+        signal.alarm(MAX_WAIT_TIME_SECONDS)
+
         # Log worker start with execution timestamp for hang detection
         execution_start = time.time()
         logging.info(f"Worker process started for test: {test_name} EXEC_START:{execution_start}")
@@ -352,20 +361,21 @@ def run_test_with_name(test_data):
         logging.debug(f"WORKER_TRACE[{pid}]: About to call run_one_test()")
         test_execution_start = time.time()
         test_passed, failure_reason = run_one_test(test_instance, test_llm, eval_llm, vision_eval_llm)
+        signal.alarm(0)  # Cancel alarm on completion
         logging.info(f"WORKER_TRACE[{pid}]: run_one_test() completed in {time.time() - test_execution_start:.3f}s, result: {test_passed}")
         return (test_name, test_passed, failure_reason)
     except Exception as e:
+        try:
+            signal.alarm(0)
+        except Exception:
+            pass
         import traceback
         error_msg = f"Exception in test execution: {e}"
         traceback_str = traceback.format_exc()
-        
-        # Log the full error details for debugging
+
         logging.error(f"Test {test_name} failed with exception: {error_msg}")
         logging.error(f"Traceback: {traceback_str}")
-        
-        # Print a shorter version to stdout so user can see it
-        print(f"EXCEPTION {str(e)}")
-        
+
         return (test_name, False, error_msg)
 
 def _cleanup_container(env):
@@ -506,6 +516,20 @@ def _check_completed_jobs(async_results, completed, job_start_times, job_test_na
     
     for i, async_result in enumerate(async_results):
         if i not in completed:
+            # Safety net: detect tests whose worker SIGALRM did not fire
+            duration = current_time - job_start_times[i]
+            if duration > MAX_WAIT_TIME_SECONDS + 60:
+                completed.append(i)
+                found_completion = True
+                total_failed[0] += 1
+                sr[job_test_names[i]] = (False, f"Test timed out after {duration:.0f}s (safety net)")
+                pbar.write(f"TIMEOUT: {job_test_names[i]} (>{MAX_WAIT_TIME_SECONDS}s, safety net)")
+                pbar.update(1)
+                total_tests = total_passed[0] + total_failed[0]
+                pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
+                pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests}, {pass_rate:.1f}%)")
+                pbar.refresh()
+                continue
             try:
                 if async_result.ready():
                     test_name, test_passed, failure_reason = async_result.get(timeout=5.0)
@@ -562,7 +586,7 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
     pbar.refresh()
     
     # Run tests in parallel with real-time progress updates and hanging detection
-    with mp.Pool(parallel_workers) as pool:
+    with mp.Pool(parallel_workers, maxtasksperchild=1) as pool:
         # Submit all jobs asynchronously
         async_results = []
         job_start_times = {}
@@ -616,7 +640,7 @@ def run_all_tests(test_llm_name, use_cache=True, which_tests=None, parallel_work
     """
     test_llm = llm.LLM(test_llm_name, use_cache=use_cache)
     print(f'test_llm: {test_llm.name}')
-    print(f'llm.eval_llm: {llm.eval_llm.name}')
+    print(f'eval_llm: {llm.eval_llm.name if llm.eval_llm else None}')
     sr = {}
     
     # Get the list of test files
@@ -765,11 +789,13 @@ def _setup_main_logging():
     # Generate timestamp-based filename
     timestamp = time.strftime('%Y-%m-%d-%H-%M-%S')
     log_filename = f'logs/debug_stream_main_{timestamp}.log'
-    
+
+    os.makedirs('logs', exist_ok=True)
+
     # SPARC: Simple configuration with performance-conscious defaults
     console_level = logging.INFO  # Reduce console noise
     file_level = logging.DEBUG if os.environ.get('BENCHMARK_VERBOSE_LOGS') == '1' else logging.INFO
-    
+
     # Create handlers with custom formatter
     file_handler = logging.FileHandler(log_filename, mode='a')
     console_handler = logging.StreamHandler(sys.stdout)
@@ -812,6 +838,7 @@ def main():
     parser.add_argument('--run-tests', help='Run a batch of tests.', action='store_true')
     parser.add_argument('--parallel', help='Number of parallel workers for test execution. Default: 1 (sequential)', type=int, default=1)
     parser.add_argument('--only-changed', help='Only run tests that have changed since the given commit (INCLUSIVE).')
+    parser.add_argument('--eval-model', help='Override the eval LLM used for grading (default: value from llm.py).', type=str)
 
     args = parser.parse_args()
 
@@ -890,6 +917,8 @@ def main():
                     for k,v in kvs.items():
                         data[model][k] = v
         elif args.run_tests:
+            if args.eval_model:
+                llm.eval_llm = llm.LLM(args.eval_model)
             tests_subset = None # run all of them
             
             if args.test:
@@ -923,9 +952,9 @@ def main():
                     data[model][k][0].append(v1)
                     data[model][k][1].append(v2)
 
-                if not os.path.exists(os.path.join(args.logdir, current_commit_hash)):
-                    os.mkdir(os.path.join(args.logdir, current_commit_hash))
-                with open(f"{args.logdir}/{current_commit_hash}/{model}-run{i+args.runid}.p", 'wb') as f:
+                result_path = f"{args.logdir}/{current_commit_hash}/{model}-run{i+args.runid}.p"
+                os.makedirs(os.path.dirname(result_path), exist_ok=True)
+                with open(result_path, 'wb') as f:
                     pickle.dump(result, f)
         else:
             raise RuntimeError("Unreachable code path - invalid execution mode")

@@ -1,0 +1,1 @@
+Run find . -name "*.pdf" -exec python3 process.py {} txt/{}.txt \;  but don't rewrite files that already exist. Instead of .pdf.txt make it just .txt

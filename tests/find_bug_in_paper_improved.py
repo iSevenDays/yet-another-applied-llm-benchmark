@@ -1,4 +1,5 @@
 from evaluator import *
+from pathlib import Path
 
 DESCRIPTION = "Improved test to find math errors in adversarial ML objective functions with clarified specifications."
 
@@ -90,7 +91,8 @@ End your answer with: **ANSWER: [list of numbers]** where the list contains the 
 of equations that are incorrect (e.g., **ANSWER: [1,4,5]**).
 """
 
-question_easier = question + "\n\n**Hint**: Remember that probabilities sum to 1 and each $F(x')_i \in [0,1]$. Consider what happens when there are many classes vs. few classes, and when probabilities are close to uniform vs. concentrated."
+_PROMPTS = Path(__file__).parent / 'prompts'
+question_easier = question + "\n\n" + (_PROMPTS / 'find_bug_in_paper_improved_hint.txt').read_text()
 
 def robust_check(x):
     """

@@ -1,39 +1,20 @@
 from evaluator import *
+from pathlib import Path
 
 DESCRIPTION = "Guided assessment of regex debugging and patch generation with clear problem statement"
 
 TAGS = ['regex', 'patch', 'debugging', 'guided']
 
-code = """import re
-
-class Tokenizer:
-    def __init__(self, input_str):
-        '''
-        input_str: a string of digits and operators
-        '''
-        self.position = 0
-        self.tokens = re.findall(r'\d+|(\+|\-|\*|/|sin|cos|\(|\))', input_str)
-
-    def get_next_token(self):
-        if self.position >= len(self.tokens):
-            return None
-        token = self.tokens[self.position]
-        self.position += 1
-        return token
-
-    def peek_next_token(self):
-        if self.position >= len(self.tokens):
-            return None
-        return self.tokens[self.position]
-"""
+_PROMPTS = Path(__file__).parent / 'prompts'
+code = (_PROMPTS / 'tokenizer_buggy_code.py').read_text()
 
 question_guided = f"""
-This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5", 
+This tokenizer has a bug in its regex pattern. When parsing "cos(1)+sin(23)*5",
 it currently produces: ['cos', '(', '', ')', '+', 'sin', '(', '', ')', '*', '']
 but should produce: ['cos', '(', '1', ')', '+', 'sin', '(', '23', ')', '*', '5']
 
-The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()` 
-in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups 
+The issue is with the regex capturing groups in re.findall(). When you use capturing groups `()`
+in a regex with multiple alternatives, re.findall() returns tuples, and non-matching groups
 return empty strings.
 
 Write a .patch file that fixes this regex bug by removing the unnecessary capturing group.
@@ -41,10 +22,10 @@ Write a .patch file that fixes this regex bug by removing the unnecessary captur
 The patch should be in unified diff format:
 ```
 --- filename.py
-+++ filename.py  
++++ filename.py
 @@ -line,count +line,count @@
  context line
--old line  
+-old line
 +new line
 ```
 
@@ -54,6 +35,8 @@ Here is the code to fix:
 ```
 """
 
+# setup_fn uses inspect.getsource() → runs in Docker, so code must be inline.
+# Backslashes are double-escaped: host parses \\d → \d, Docker re-parses \\d → \d.
 def setup_fn():
     code = """import re
 
@@ -63,7 +46,7 @@ class Tokenizer:
         input_str: a string of digits and operators
         '''
         self.position = 0
-        self.tokens = re.findall(r'\d+|(\+|\-|\*|/|sin|cos|\(|\))', input_str)
+        self.tokens = re.findall(r'\\d+|(\\+|\\-|\\*|/|sin|cos|\\(|\\))', input_str)
 
     def get_next_token(self):
         if self.position >= len(self.tokens):
@@ -88,9 +71,9 @@ def check_guided():
     result = os.system("patch < fix.patch")
     if result != 0:
         return False, "Patch application failed - check patch format"
-        
+
     time.sleep(.5)
-    
+
     try:
         import run_tokenizer
         actual = run_tokenizer.Tokenizer("cos(1)+sin(23)*5").tokens

@@ -1,0 +1,1 @@
+**Hint**: Remember that probabilities sum to 1 and each $F(x')_i \in [0,1]$. Consider what happens when there are many classes vs. few classes, and when probabilities are close to uniform vs. concentrated.

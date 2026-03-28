@@ -194,18 +194,28 @@ class LLM:
                         raise TimeoutError("Stream chunk timeout exceeded - stream appears dead.")
 
                     content_part = ""
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        content_part = chunk.choices[0].delta.content
+                    if chunk.choices and chunk.choices[0].delta:
+                        delta = chunk.choices[0].delta
+                        # Standard content field
+                        if delta.content:
+                            content_part = delta.content
+                        # Thinking/reasoning models may use reasoning_content
+                        elif getattr(delta, 'reasoning_content', None):
+                            # Reasoning tokens — don't include in response but count as activity
+                            last_chunk_time = current_time
+                            received_chunks += 0  # already counted above
+                            continue
+
+                    if content_part:
                         full_response_content += content_part
-                        log_accumulator += content_part # Add to accumulator
+                        log_accumulator += content_part
                         chunk_count += 1
                         content_chunks += 1
-                        last_chunk_time = current_time  # Update last chunk time
+                        last_chunk_time = current_time
 
-                        # Log progress periodically (reduced frequency for performance)
-                        if chunk_count % (log_chunk_interval * 2) == 0:  # Log every 1000 chunks instead of 500
+                        if chunk_count % (log_chunk_interval * 2) == 0:
                             self._log_stream_progress(chunk_count, start_time, log_accumulator)
-                            log_accumulator = "" # Reset accumulator
+                            log_accumulator = ""
                     
                     # Check for completion markers that indicate stream should end
                     if chunk.choices and chunk.choices[0].finish_reason:
@@ -243,18 +253,21 @@ class LLM:
                     
                 return ""  # Return empty string instead of raising, to trigger empty response logging
             except Exception as e:
-                # Check if this is the specific RemoteProtocolError that should trigger backoff retry
-                if "RemoteProtocolError" in str(e) and "peer closed connection" in str(e):
+                error_str = str(e)
+                # Re-raise connection/transient errors so the backoff retry loop can handle them
+                if "APIConnectionError" in type(e).__name__ or "ConnectionError" in type(e).__name__:
+                    logging.warning(f"Connection error for {self.name}: {e}")
+                    raise
+                if "RemoteProtocolError" in error_str and "peer closed connection" in error_str:
                     logging.warning(f"RemoteProtocolError for {self.name}: {e}")
-                    # Re-raise the exception so the backoff mechanism can catch it
-                    raise e
-                # Check if this is a network timeout specifically
-                elif "ReadTimeout" in str(e) or "timed out" in str(e):
+                    raise
+                # Network timeouts - also worth retrying
+                if "ReadTimeout" in error_str or "timed out" in error_str:
                     logging.warning(f"Network timeout for {self.name}: {e}")
-                    return ""  # Return empty string to trigger empty response logging
-                
+                    raise
+
                 logging.error(f"Error processing stream for {self.name}: {e}", exc_info=True)
-                
+
                 # Log connection state on error
                 try:
                     current_process = psutil.Process(os.getpid())
@@ -262,8 +275,8 @@ class LLM:
                     logging.error(f"CONN_MONITOR: {len(connections)} active connections during ERROR")
                 except Exception:
                     pass
-                
-                return ""  # Return empty string instead of raising, to trigger empty response logging
+
+                return ""  # Return empty string for non-retryable errors
             finally:
                 # Ensure stream is properly closed to prevent connection leaks
                 if stream and hasattr(stream, 'close'):
@@ -288,15 +301,18 @@ class LLM:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(process_request_and_stream, json_arg=json, overall_timeout=3600)
                     response = future.result()
-                    break
+                    if response and response.strip():
+                        break  # Got a valid response
+                    logging.warning(f"Empty response on attempt {i+1} for model {self.name}, will retry")
+                    response = "Model API request failed"
 
-            except TimeoutError: 
+            except TimeoutError:
                 logging.warning(f"Caught timeout on attempt {i+1} for model {self.name}")
                 response = "Model API request failed due to timeout"
             except Exception as e:
-                logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False) 
-                response = f"Model API request failed: {type(e).__name__}" 
-            
+                logging.error(f"RUN FAILED on attempt {i+1} for model {self.name}: {e}", exc_info=False)
+                response = f"Model API request failed: {type(e).__name__}"
+
             if i < len(backoff_times) - 1:  # Don't sleep after the last attempt
                 wait_time = backoff_times[i]
                 logging.info(f"Request failed on attempt {i+1}. Retrying in {wait_time} seconds...")

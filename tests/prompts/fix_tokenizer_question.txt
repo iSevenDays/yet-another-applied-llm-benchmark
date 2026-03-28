@@ -1,0 +1,18 @@
+Fix this tokenizer keeping it as similar as possible
+
+class Tokenizer:
+    def __init__(self, input_str):
+        self.tokens = re.findall(r'\d+|(\+|\-|\*|/|sin|cos|\(|\))', input_str)
+        self.position = 0
+
+    def get_next_token(self):
+        if self.position >= len(self.tokens):
+            return None
+        token = self.tokens[self.position]
+        self.position += 1
+        return token
+
+    def peek_next_token(self):
+        if self.position >= len(self.tokens):
+            return None
+        return self.tokens[self.position]

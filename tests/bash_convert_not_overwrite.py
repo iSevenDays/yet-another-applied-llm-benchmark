@@ -1,10 +1,12 @@
 from evaluator import *
+from pathlib import Path
 
 DESCRIPTION = "Test if a model can run an incremental update of a bash command without overwriting files that already exist"
 
 TAGS = ['bash']
 
-question = 'Run find . -name "*.pdf" -exec python3 process.py {} txt/{}.txt \;  but don\'t rewrite files that already exist. Instead of .pdf.txt make it just .txt'
+_PROMPTS = Path(__file__).parent / 'prompts'
+question = (_PROMPTS / 'bash_convert_not_overwrite_question.txt').read_text()
 
 
 def setup_fn():
@@ -23,7 +25,7 @@ def check_ok():
     return open("txt/a.txt").read() == "done1" and open("txt/b.txt").read() == "hello2" and open("txt/c.txt").read() == "done3" and len(os.listdir("txt")) == 3
 
 
-    
+
 TestBashIncrementalUpdate = Setup(setup_fn) >> question >> LLMRun() >> ExtractCode(keep_main=True) >> BashRun() >> PyEvaluator(check_ok)
 
 

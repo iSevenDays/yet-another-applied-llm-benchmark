@@ -1,4 +1,5 @@
 from evaluator import *
+from pathlib import Path
 
 DESCRIPTION = "Test if a model can find math errors in the latex source of a paper."
 
@@ -81,7 +82,8 @@ $\loss_{F,s}(x)$ is the cross entropy loss for $x$.
 Consider each equation one by one. End your answer with a python list of numbers [1,2,3,4,5,6,7] for those that are wrong.
 """
 
-question_easier = question + "\nSpecifically, make sure that $C(x+\delta) = t$ if and only if $f(x+\delta) \le 0$. Think step by step about if this is true for each equation and then give your answer as a python list"
+_PROMPTS = Path(__file__).parent / 'prompts'
+question_easier = question + "\n" + (_PROMPTS / 'find_bug_in_paper_hint.txt').read_text()
 
 def check(x):
     ints = list(map(int,x.split("[")[-1].split("]")[0].split(",")))

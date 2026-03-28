@@ -9,7 +9,7 @@ system_prompt: ""
 
 # Global hyperparameters applied to all models (can be overridden per provider)
 hparams:
-  max_tokens: 16384
+  max_tokens: 65536
   reasoning_effort: "high"
 
 # Model provider configurations
@@ -20,9 +20,8 @@ llms:
 
   # OpenAI-compatible API (main endpoint with thinking budget support)
   openai:
-    api_key: "sk-12345"
-    #api_base: "http://192.168.0.24:8000/v1"
-    api_base: "http://localhost:8080/v1"
+ #   api_key: "sk-12345"
+    api_base: "http://192.168.0.24:8080/v1"
     # Provider-specific parameters
     # hparams:
     #   extra_body:
@@ -31,8 +30,8 @@ llms:
 
   # OpenAI-compatible API (evaluation endpoint)
   openai_eval:
-    api_key: "sk-12345"
-    api_base: "http://192.168.0.202:1234/v1"
+#    api_key: "sk-12345"
+    api_base: "http://192.168.0.24:8080/v1"
 
   # Mistral AI
   mistral:

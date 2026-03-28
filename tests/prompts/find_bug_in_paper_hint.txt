@@ -1,0 +1,1 @@
+Specifically, make sure that $C(x+\delta) = t$ if and only if $f(x+\delta) \le 0$. Think step by step about if this is true for each equation and then give your answer as a python list
