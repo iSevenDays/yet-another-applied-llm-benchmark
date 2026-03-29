@@ -558,6 +558,37 @@ def _fill_parallel_worker_slots(pool, all_test_data, next_job_index, active_jobs
     return next_job_index
 
 
+def _format_parallel_status(active_jobs, current_time, queued_jobs=0, max_listed_jobs=5):
+    """Return a concise summary of active parallel work."""
+    running = []
+    for job_info in active_jobs.values():
+        if not job_info["async_result"].ready():
+            duration = current_time - job_info["started_at"]
+            running.append((duration, job_info["test_name"]))
+
+    if not running:
+        summary = "PARALLEL: no active running jobs"
+        if queued_jobs > 0:
+            summary += f", {queued_jobs} queued"
+        return summary
+
+    running.sort(reverse=True)
+    top_jobs = ", ".join(
+        f"{test_name}({duration:.0f}s)"
+        for duration, test_name in running[:max_listed_jobs]
+    )
+    extra = len(running) - min(len(running), max_listed_jobs)
+
+    parts = [f"PARALLEL: {len(running)} active"]
+    if queued_jobs > 0:
+        parts.append(f"{queued_jobs} queued")
+
+    summary = ", ".join(parts) + f". Slowest: {top_jobs}"
+    if extra > 0:
+        summary += f" (+{extra} more)"
+    return summary
+
+
 def _check_completed_jobs(active_jobs, current_time, total_passed, total_failed, sr, pbar):
     """Check for completed jobs and process their results. Returns True if any job completed."""
     found_completion = False
@@ -654,14 +685,8 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
             
             # Periodic status logging
             if current_time - last_status_log > STATUS_LOG_INTERVAL_SECONDS:
-                running_jobs = []
-                for job_info in active_jobs.values():
-                    if not job_info["async_result"].ready():
-                        duration = current_time - job_info["started_at"]
-                        running_jobs.append(f"{job_info['test_name']}({duration:.0f}s)")
-                
-                if running_jobs:
-                    logging.info(f"PARALLEL: {len(running_jobs)} jobs still running: {', '.join(running_jobs)}")
+                queued_jobs = max(0, len(all_test_data) - next_job_index)
+                logging.info(_format_parallel_status(active_jobs, current_time, queued_jobs=queued_jobs))
                 last_status_log = current_time
             
             # Check for completed jobs

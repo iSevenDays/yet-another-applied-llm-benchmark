@@ -48,6 +48,31 @@ class FakePbar:
 
 
 class TestParallelScheduler(unittest.TestCase):
+    def test_format_parallel_status_limits_list_and_reports_queue(self):
+        active_jobs = {
+            0: {"async_result": FakeAsyncResult(ready=False), "started_at": 0.0, "test_name": "t0"},
+            1: {"async_result": FakeAsyncResult(ready=False), "started_at": 10.0, "test_name": "t1"},
+            2: {"async_result": FakeAsyncResult(ready=False), "started_at": 20.0, "test_name": "t2"},
+            3: {"async_result": FakeAsyncResult(ready=False), "started_at": 30.0, "test_name": "t3"},
+            4: {"async_result": FakeAsyncResult(ready=False), "started_at": 40.0, "test_name": "t4"},
+            5: {"async_result": FakeAsyncResult(ready=False), "started_at": 50.0, "test_name": "t5"},
+        }
+
+        summary = main._format_parallel_status(active_jobs, 100.0, queued_jobs=12, max_listed_jobs=3)
+
+        self.assertIn("6 active", summary)
+        self.assertIn("12 queued", summary)
+        self.assertIn("Slowest:", summary)
+        self.assertIn("t0(100s)", summary)
+        self.assertIn("t1(90s)", summary)
+        self.assertIn("t2(80s)", summary)
+        self.assertIn("(+3 more)", summary)
+        self.assertNotIn("t5(50s)", summary)
+
+    def test_format_parallel_status_handles_no_running_jobs(self):
+        summary = main._format_parallel_status({}, 100.0, queued_jobs=4)
+        self.assertEqual(summary, "PARALLEL: no active running jobs, 4 queued")
+
     def test_fill_parallel_worker_slots_respects_parallelism_limit(self):
         pool = FakePool()
         active_jobs = {}
