@@ -48,6 +48,14 @@ class FakePbar:
 
 
 class TestParallelScheduler(unittest.TestCase):
+    def test_stage_hang_threshold_scales_with_max_wait_time(self):
+        self.assertEqual(main._stage_hang_threshold_seconds(3600), 1800)
+        self.assertEqual(main._stage_hang_threshold_seconds(1200), 600)
+
+    def test_stage_hang_threshold_never_exceeds_timeout_budget(self):
+        self.assertEqual(main._stage_hang_threshold_seconds(300), 299)
+        self.assertEqual(main._stage_hang_threshold_seconds(61), 60)
+
     def test_format_parallel_status_limits_list_and_reports_queue(self):
         active_jobs = {
             0: {"async_result": FakeAsyncResult(ready=False), "started_at": 0.0, "test_name": "t0"},

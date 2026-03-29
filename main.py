@@ -39,12 +39,28 @@ MAX_FAILURE_REASON_LENGTH = 400
 MAX_WAIT_TIME_SECONDS = 3600
 STATUS_LOG_INTERVAL_SECONDS = 30
 WORKER_LOG_CHUNK_INTERVAL = 500
-STAGE_HANG_THRESHOLD_SECONDS = 600
+MIN_STAGE_HANG_THRESHOLD_SECONDS = 600
 DEFAULT_MODELS = [
     "gpt-4o", "gpt-4-0125-preview", "claude-3-opus-20240229", 
     "claude-3-sonnet-20240229", "gpt-3.5-turbo-0125", "gemini-pro", 
     "mistral-large-latest", "mistral-medium"
 ]
+
+
+def _stage_hang_threshold_seconds(max_wait_time_seconds=MAX_WAIT_TIME_SECONDS):
+    """Derive a hang warning threshold from the active safety timeout budget.
+
+    The warning should remain meaningful after timeout changes and should never
+    exceed the configured safety timeout for a job.
+    """
+    if max_wait_time_seconds <= 1:
+        return max_wait_time_seconds
+
+    derived_threshold = max(
+        MIN_STAGE_HANG_THRESHOLD_SECONDS,
+        int(max_wait_time_seconds * 0.5),
+    )
+    return min(max_wait_time_seconds - 1, derived_threshold)
 
 def _load_test_module(filename):
     """Load a test module and return module object and test names.
@@ -443,6 +459,7 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
     pid = os.getpid()
     test_name = getattr(test, '__name__', str(test))
     start_time = time.time()
+    stage_hang_threshold_seconds = _stage_hang_threshold_seconds()
     
     logging.info(f"TEST_TRACE[{pid}]: Starting test execution for {test_name}")
     
@@ -468,7 +485,7 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
             logging.debug(f"TEST_TRACE[{pid}]: Pipeline stage {stage_count} completed in {stage_duration:.3f}s, success: {success}")
             logging.info(f"STAGE: {test_name} stage {stage_count} completed in {stage_duration:.1f}s, success={success}")
             
-            if stage_duration > STAGE_HANG_THRESHOLD_SECONDS:
+            if stage_duration > stage_hang_threshold_seconds:
                 # Try to extract which node type is running for better debugging
                 node_context = ""
                 if hasattr(output, 'node'):
@@ -482,7 +499,10 @@ def run_one_test(test, test_llm, eval_llm, vision_eval_llm):
                     elif 'LLMRun' in test_repr:
                         node_context = f" (LLM execution)"
                 
-                logging.warning(f"HANG_DETECT: {test_name} stage {stage_count} took {stage_duration:.1f}s (>{STAGE_HANG_THRESHOLD_SECONDS}s){node_context}")
+                logging.warning(
+                    f"HANG_DETECT: {test_name} stage {stage_count} took "
+                    f"{stage_duration:.1f}s (>{stage_hang_threshold_seconds}s){node_context}"
+                )
             
             last_stage_time = current_time
             

@@ -10,6 +10,10 @@ class TestExtractionHeuristics(unittest.TestCase):
         node.setup(None, None, lambda *args, **kwargs: "", lambda *args, **kwargs: "", None)
         return node
 
+    def _setup_node_with_eval(self, node, eval_response):
+        node.setup(None, None, lambda *args, **kwargs: "", lambda *args, **kwargs: eval_response, None)
+        return node
+
     def test_extract_json_from_prose_wrapped_response_without_fallback(self):
         node = self._setup_node(ExtractJSON())
 
@@ -129,6 +133,79 @@ def fix_json(text):
         extracted, _ = next(node(response))
         self.assertTrue(extracted.lstrip().startswith("def fix_json"))
         self.assertNotIn("* walks the input", extracted)
+
+    def test_extract_code_falls_back_when_python_candidate_is_syntax_invalid(self):
+        node = self._setup_node_with_eval(
+            ExtractCode(lang="python"),
+            "def one_hot(indexes, num_classes):\n    return indexes\n",
+        )
+
+        response = """
+def one_hot(indexes, num_classes):
+    \"\"\"
+    Args:
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn("def one_hot(indexes, num_classes):", extracted)
+        self.assertIn("return indexes", extracted)
+        self.assertNotIn('"""', extracted)
+
+    def test_extract_code_strips_python_main_block_when_keep_main_is_false(self):
+        node = self._setup_node(ExtractCode(lang="python"))
+
+        response = """
+```python
+def evaluate(expr):
+    return 1.0
+
+if __name__ == "__main__":
+    got = evaluate("1+2")
+    print(f"{got:.12f}")
+```
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn("def evaluate(expr):", extracted)
+        self.assertNotIn('__name__ == "__main__"', extracted)
+        self.assertNotIn("print(f", extracted)
+
+    def test_extract_code_rejects_main_only_python_candidate_and_uses_fallback(self):
+        node = self._setup_node_with_eval(
+            ExtractCode(lang="python"),
+            "def move(x):\n    return {x}\n",
+        )
+
+        response = """
+```python
+if __name__ == "__main__":
+    tests = [("ab", {"ba"})]
+    for s, expected in tests:
+        assert move(s) == expected
+```
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn("def move(x):", extracted)
+        self.assertNotIn('__name__ == "__main__"', extracted)
+
+    def test_extract_code_rejects_plain_output_text_and_uses_fallback(self):
+        node = self._setup_node_with_eval(
+            ExtractCode(lang="python", keep_main=True),
+            "import traceback\n\ndef crashes():\n    x = 5\n    raise Exception()\n",
+        )
+
+        response = """
+y: 6
+x: 5
+exc: This is a test exception
+tb: <traceback object at 0x123>
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn("import traceback", extracted)
+        self.assertIn("def crashes():", extracted)
+        self.assertNotIn("tb: <traceback object", extracted)
 
 
 if __name__ == "__main__":

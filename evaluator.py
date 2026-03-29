@@ -24,6 +24,7 @@ import docker
 import inspect
 import re
 import unicodedata
+import ast
 
 import numpy as np
 
@@ -183,6 +184,8 @@ def _extract_code_candidates(text):
         candidate_lines = []
         prose_streak = 0
         for line in lines[start_idx:]:
+            if line.strip().startswith("```"):
+                break
             if not line.strip():
                 candidate_lines.append(line)
                 prose_streak = 0
@@ -199,10 +202,6 @@ def _extract_code_candidates(text):
         if candidate:
             candidates.append(candidate)
 
-    raw = normalized.strip()
-    if raw and not candidates:
-        candidates.append(raw)
-
     deduped = []
     seen = set()
     for candidate in candidates:
@@ -210,6 +209,145 @@ def _extract_code_candidates(text):
             deduped.append(candidate)
             seen.add(candidate)
     return deduped
+
+
+def _looks_like_python_code(candidate):
+    if not isinstance(candidate, str):
+        return False
+    stripped = candidate.strip()
+    if not stripped:
+        return False
+    python_markers = [
+        r"^\s*def\s+\w+",
+        r"^\s*class\s+\w+",
+        r"^\s*from\s+\w+",
+        r"^\s*import\s+\w+",
+        r"^\s*@\w",
+        r"^\s*if\s+__name__\s*==",
+    ]
+    return any(re.search(marker, candidate, flags=re.MULTILINE) for marker in python_markers)
+
+
+def _has_python_definition(candidate):
+    return bool(re.search(r"^\s*(?:async\s+def|def|class)\b", candidate, flags=re.MULTILINE))
+
+
+def _is_python_main_guard(node):
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+
+    left = test.left
+    right = test.comparators[0]
+    if not isinstance(left, ast.Name) or left.id != "__name__":
+        return False
+    if not isinstance(right, ast.Constant) or right.value != "__main__":
+        return False
+    return True
+
+
+def _strip_python_main_blocks(candidate):
+    try:
+        tree = ast.parse(candidate)
+    except SyntaxError:
+        return candidate
+
+    removal_ranges = []
+    for node in tree.body:
+        if _is_python_main_guard(node) and getattr(node, "lineno", None) and getattr(node, "end_lineno", None):
+            removal_ranges.append((node.lineno, node.end_lineno))
+
+    if not removal_ranges:
+        return candidate
+
+    lines = candidate.splitlines()
+    kept_lines = []
+    for lineno, line in enumerate(lines, start=1):
+        if any(start <= lineno <= end for start, end in removal_ranges):
+            continue
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip("\n")
+
+
+def _unwrap_markdown_inline(text):
+    value = text.strip()
+    previous = None
+    while value != previous and value:
+        previous = value
+        value = re.sub(r"^\*\*(.*?)\*\*$", r"\1", value.strip(), flags=re.DOTALL)
+        value = re.sub(r"^\*(.*?)\*$", r"\1", value.strip(), flags=re.DOTALL)
+        value = re.sub(r"^`(.*?)`$", r"\1", value.strip(), flags=re.DOTALL)
+    return value.strip()
+
+
+def extract_final_answer_candidate(text):
+    if not isinstance(text, str):
+        return ""
+
+    normalized = normalize_text_for_extraction(text).strip()
+    if not normalized:
+        return ""
+
+    match = None
+    for candidate_match in re.finditer(r"final answer\s*:?\s*", normalized, flags=re.IGNORECASE):
+        match = candidate_match
+
+    if match is None:
+        return ""
+
+    candidate = normalized[match.end():].strip()
+    if not candidate:
+        return ""
+
+    first_line = candidate.splitlines()[0].strip()
+    first_line = re.sub(r"^[>*\-\s]+", "", first_line)
+    first_line = _unwrap_markdown_inline(first_line)
+    return first_line.strip()
+
+
+def _format_judge_context(output):
+    if not isinstance(output, str):
+        return ""
+
+    normalized = normalize_text_for_extraction(output).strip()
+    if not normalized:
+        return ""
+
+    sections = [
+        "Student answer (verbatim):",
+        "```text",
+        normalized,
+        "```",
+    ]
+
+    final_answer = extract_final_answer_candidate(normalized)
+    if final_answer and final_answer != normalized:
+        sections.extend([
+            "",
+            "Extracted final answer candidate:",
+            "```text",
+            final_answer,
+            "```",
+        ])
+
+    return "\n".join(sections)
+
+
+def _augment_judge_prompt(check_prompt, output, which_llm):
+    prompt = check_prompt.replace("<A>", output)
+    if which_llm != EVAL_LLM or "<A>" not in check_prompt:
+        return prompt
+
+    judge_context = _format_judge_context(output)
+    if not judge_context:
+        return prompt
+
+    return f"{prompt}\n\nFor clarity, use the structured student-answer context below.\n{judge_context}"
 
 class Env:
     """
@@ -740,19 +878,105 @@ class ExtractCode(Node):
         self.manual = manual
         self.lang = lang
 
+    def _preprocess_candidate(self, candidate):
+        processed = candidate.strip("\n")
+        language_hint = (self.lang or "").lower()
+        should_treat_as_python = "python" in language_hint or _looks_like_python_code(processed)
+
+        if should_treat_as_python and not self.keep_main:
+            processed = _strip_python_main_blocks(processed)
+
+        return processed.strip("\n")
+
     def try_extract(self, output):
         """Extract code from markdown blocks or raw text."""
         for candidate in _extract_code_candidates(output):
-            yield candidate + ("\n" + self.postfix if self.postfix else "")
+            processed = self._preprocess_candidate(candidate)
+            if not processed:
+                continue
+            yield processed + ("\n" + self.postfix if self.postfix else "")
+
+    def _candidate_has_signal(self, candidate):
+        language_hint = (self.lang or "").lower()
+        stripped = candidate.strip()
+        if not stripped:
+            return False
+
+        nonempty_lines = [line for line in stripped.splitlines() if line.strip()]
+        if not nonempty_lines:
+            return False
+
+        is_python = "python" in language_hint or _looks_like_python_code(candidate)
+        if is_python:
+            if _has_python_definition(candidate):
+                return True
+            if self.keep_main and re.search(r'^\s*if\s+__name__\s*==\s*["\']__main__["\']\s*:', candidate, flags=re.MULTILINE):
+                return True
+            return False
+
+        if "assembly" in language_hint:
+            for line in nonempty_lines:
+                stripped_line = line.strip()
+                if stripped_line.startswith((";", "//")):
+                    continue
+                if re.match(r"^[A-Za-z_][\w]*:\s*(?:;.*)?$", stripped_line):
+                    continue
+                first_token = stripped_line.replace(",", " ").split()[0]
+                if first_token.upper() in ASSEMBLY_OPS:
+                    continue
+                return False
+            return True
+
+        if "c" in language_hint or "cpp" in language_hint:
+            if re.search(r"^\s*#include\b", candidate, flags=re.MULTILINE):
+                return True
+            if re.search(r"^\s*[A-Za-z_][\w\s\*]*\s+[A-Za-z_]\w*\s*\([^;{}]*\)\s*\{", candidate, flags=re.MULTILINE):
+                return True
+
+        return any(_looks_like_code_line(line) for line in nonempty_lines)
+
+    def _candidate_score(self, candidate):
+        score = 0
+        language_hint = (self.lang or "").lower()
+        nonempty_lines = [line for line in candidate.splitlines() if line.strip()]
+        score += len(nonempty_lines)
+        score += sum(1 for line in nonempty_lines if _looks_like_code_line(line))
+
+        is_python = "python" in language_hint or _looks_like_python_code(candidate)
+        if is_python:
+            has_defs = _has_python_definition(candidate)
+            has_main = bool(re.search(r'^\s*if\s+__name__\s*==\s*["\']__main__["\']\s*:', candidate, flags=re.MULTILINE))
+            score += 30 if has_defs else 0
+            score += 5 if re.search(r"^\s*(?:from|import)\b", candidate, flags=re.MULTILINE) else 0
+            score -= 40 if has_main and not has_defs and not self.keep_main else 0
+            score -= 8 if re.search(r"^\s*assert\b", candidate, flags=re.MULTILINE) else 0
+            score -= 8 if "All tests passed" in candidate else 0
+            score -= 5 if re.search(r"^\s*tests\s*=", candidate, flags=re.MULTILINE) else 0
+
+        return score
+
+    def _candidate_is_valid(self, candidate):
+        language_hint = (self.lang or "").lower()
+        if not self._candidate_has_signal(candidate):
+            return False
+        should_validate_python = "python" in language_hint or _looks_like_python_code(candidate)
+        if not should_validate_python:
+            return True
+        try:
+            ast.parse(candidate)
+            return True
+        except SyntaxError:
+            return False
         
     def __call__(self, orig_output):
         import logging
         logging.debug(f"ExtractCode input ({len(orig_output)} chars): {orig_output[:200]}{'...' if len(orig_output) > 200 else ''}")
         
         immediate_candidates = list(self.try_extract(orig_output))
-        if immediate_candidates:
+        valid_immediate_candidates = [candidate for candidate in immediate_candidates if self._candidate_is_valid(candidate)]
+        if valid_immediate_candidates:
             logging.debug("ExtractCode: Using direct extraction candidates before eval_llm fallback")
-            for maybe in immediate_candidates:
+            for maybe in sorted(valid_immediate_candidates, key=self._candidate_score, reverse=True):
                 yield maybe, Reason(type(self), maybe)
             return
 
@@ -776,7 +1000,10 @@ class ExtractCode(Node):
         # Strip thinking tokens from eval_llm output
         output = strip_thinking_tokens(output)
 
-        for maybe in self.try_extract(output):
+        valid_fallback_candidates = [candidate for candidate in self.try_extract(output) if self._candidate_is_valid(candidate)]
+        fallback_candidates = valid_fallback_candidates or list(self.try_extract(output))
+
+        for maybe in sorted(fallback_candidates, key=self._candidate_score, reverse=True):
             yield maybe, Reason(type(self), maybe)
 
 class MakeFile(Node):
@@ -1006,7 +1233,7 @@ class LLMRun(Node):
         logging.debug(f"LLMRUN_TRACE[{pid}]: Starting LLMRun.__call__")
         
         llm = getattr(self, self.which_llm)
-        to_send = self.check_prompt.replace("<A>", output)
+        to_send = _augment_judge_prompt(self.check_prompt, output, self.which_llm)
         
         logging.debug(f"LLMRUN_TRACE[{pid}]: LLMRun prompt ({len(to_send)} chars): {to_send[:200]}{'...' if len(to_send) > 200 else ''}")
         
