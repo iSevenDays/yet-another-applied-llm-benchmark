@@ -25,6 +25,7 @@ import inspect
 import re
 import unicodedata
 import ast
+import shlex
 
 import numpy as np
 
@@ -1137,20 +1138,22 @@ class CRun(Node):
 
     Optionally append a set of test cases to the code that's been provided.
     """
-    def __init__(self, test_case="", out_bytes=False, gccflags="", argv=""):
+    def __init__(self, test_case="", out_bytes=False, gccflags="", argv="", source_name="main.c"):
         self.test_case = test_case
         self.out_bytes = out_bytes
         self.gccflags = gccflags
         self.argv = argv
+        self.source_name = source_name
 
     def __call__(self, code):
         if 'int main' in code and 'int main' in self.test_case:
             code = code.replace('int main', 'int __delete_this__main')
 
         code = code + "\n\n" + self.test_case
+        quoted_source_name = shlex.quote(self.source_name)
         
-        out = invoke_docker(self.env, {"main.c": code.encode(),
-                                       "main.sh": f"gcc -o a.out main.c -lm {self.gccflags}\n./a.out {self.argv}".encode()},
+        out = invoke_docker(self.env, {self.source_name: code.encode(),
+                                       "main.sh": f"gcc -o a.out {quoted_source_name} -lm {self.gccflags}\n./a.out {self.argv}".encode()},
                             ["bash", "main.sh"], out_bytes=self.out_bytes)
         yield out, Reason(type(self), (code, out))
 
