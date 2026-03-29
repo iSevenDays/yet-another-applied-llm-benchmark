@@ -94,6 +94,42 @@ python code.py /tmp
         self.assertNotIn("Install Pillow", extracted)
         self.assertNotIn("pip install pillow", extracted)
 
+    def test_extract_code_preserves_python_indentation_from_fenced_block(self):
+        node = self._setup_node(ExtractCode(lang="python"))
+
+        response = """
+```python
+class Tokenizer:
+    def __init__(self, input_str):
+        self.input_str = input_str
+
+    def get_next_token(self):
+        if not self.input_str:
+            return None
+        return self.input_str[0]
+```
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn("    def __init__(self, input_str):", extracted)
+        self.assertIn("        self.input_str = input_str", extracted)
+        self.assertIn("    def get_next_token(self):", extracted)
+
+    def test_extract_code_does_not_treat_markdown_bullets_as_code(self):
+        node = self._setup_node(ExtractCode(lang="python"))
+
+        response = """
+* walks the input character-by-character
+* keeps state outside strings
+
+def fix_json(text):
+    return text
+"""
+
+        extracted, _ = next(node(response))
+        self.assertTrue(extracted.lstrip().startswith("def fix_json"))
+        self.assertNotIn("* walks the input", extracted)
+
 
 if __name__ == "__main__":
     unittest.main()

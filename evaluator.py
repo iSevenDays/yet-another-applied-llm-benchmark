@@ -99,6 +99,14 @@ def normalize_text_for_comparison(text):
     return re.sub(r"[ \t]+", " ", text)
 
 
+def normalize_text_for_extraction(text):
+    if not isinstance(text, str):
+        return text
+    text = strip_thinking_tokens(text)
+    text = unicodedata.normalize("NFKC", text).translate(UNICODE_TEXT_TRANSLATION)
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _fenced_code_blocks(text):
     return [match.group(1).strip("\n") for match in re.finditer(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", text, flags=re.DOTALL)]
 
@@ -106,7 +114,7 @@ def _fenced_code_blocks(text):
 def _extract_balanced_json_strings(text):
     decoder = json.JSONDecoder()
     candidates = []
-    normalized = normalize_text_for_comparison(text)
+    normalized = normalize_text_for_extraction(text)
     for match in re.finditer(r"[\[{]", normalized):
         snippet = normalized[match.start():].lstrip()
         try:
@@ -124,7 +132,7 @@ def _looks_like_code_line(line):
         return True
     if stripped.startswith("```"):
         return False
-    if stripped.startswith(("#", "//", "/*", "*", "*/", "--")):
+    if stripped.startswith(("#", "//", "/*", "*/", "--")):
         return True
     if re.match(r"^[A-Za-z_][\w]*:\s*(?:;.*)?$", stripped):
         return True
@@ -144,6 +152,8 @@ def _looks_like_prose_line(line):
         return False
     if stripped.startswith("|") and stripped.endswith("|"):
         return True
+    if re.match(r"^[*+-]\s+", stripped):
+        return True
     if re.match(r"^\d+\.\s+", stripped):
         return True
     if re.match(r"^(?:pip|python|python3|uv|cargo|gcc|g\+\+|rustc|node|npm|pnpm|yarn)\b", stripped):
@@ -155,7 +165,7 @@ def _looks_like_prose_line(line):
 
 
 def _extract_code_candidates(text):
-    normalized = normalize_text_for_comparison(text)
+    normalized = normalize_text_for_extraction(text)
     fenced_blocks = _fenced_code_blocks(normalized)
     candidates = []
     candidates.extend(block for block in fenced_blocks if block.strip())
