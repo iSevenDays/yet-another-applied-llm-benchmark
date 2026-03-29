@@ -545,66 +545,80 @@ def _run_tests_sequential(test_files, pbar, test_llm, sr, total_passed, total_fa
         pbar.n = initial_file_progress + 1
         pbar.refresh()
 
-def _check_completed_jobs(async_results, completed, job_start_times, job_test_names, 
-                         current_time, total_passed, total_failed, sr, pbar):
+def _fill_parallel_worker_slots(pool, all_test_data, next_job_index, active_jobs, parallel_workers):
+    """Submit new jobs until all worker slots are full or no tests remain."""
+    while len(active_jobs) < parallel_workers and next_job_index < len(all_test_data):
+        test_data = all_test_data[next_job_index]
+        active_jobs[next_job_index] = {
+            "async_result": pool.apply_async(run_test_with_name, (test_data,)),
+            "started_at": time.time(),
+            "test_name": test_data[0],
+        }
+        next_job_index += 1
+    return next_job_index
+
+
+def _check_completed_jobs(active_jobs, current_time, total_passed, total_failed, sr, pbar):
     """Check for completed jobs and process their results. Returns True if any job completed."""
     found_completion = False
     
-    for i, async_result in enumerate(async_results):
-        if i not in completed:
-            # Safety net: detect tests whose worker SIGALRM did not fire
-            duration = current_time - job_start_times[i]
-            if duration > MAX_WAIT_TIME_SECONDS + 60:
-                completed.append(i)
+    for job_id, job_info in list(active_jobs.items()):
+        async_result = job_info["async_result"]
+        test_name = job_info["test_name"]
+        duration = current_time - job_info["started_at"]
+
+        # Safety net: detect tests whose worker SIGALRM did not fire
+        if duration > MAX_WAIT_TIME_SECONDS + 60:
+            del active_jobs[job_id]
+            found_completion = True
+            total_failed[0] += 1
+            sr[test_name] = (False, f"Test timed out after {duration:.0f}s (safety net)")
+            pbar.write(f"TIMEOUT: {test_name} (>{MAX_WAIT_TIME_SECONDS}s, safety net)")
+            pbar.update(1)
+            total_tests = total_passed[0] + total_failed[0]
+            pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
+            pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests}, {pass_rate:.1f}%)")
+            pbar.refresh()
+            continue
+        try:
+            if async_result.ready():
+                test_name, test_passed, failure_reason = async_result.get(timeout=5.0)
+                del active_jobs[job_id]
                 found_completion = True
-                total_failed[0] += 1
-                sr[job_test_names[i]] = (False, f"Test timed out after {duration:.0f}s (safety net)")
-                pbar.write(f"TIMEOUT: {job_test_names[i]} (>{MAX_WAIT_TIME_SECONDS}s, safety net)")
+                duration = current_time - job_info["started_at"]
+                logging.info(f"PARALLEL: Job {test_name} completed in {duration:.1f}s, success={test_passed}")
+                
+                # Process the result
+                if test_passed:
+                    total_passed[0] += 1
+                else:
+                    total_failed[0] += 1
+                    
+                sr[test_name] = (test_passed, failure_reason)
+                _log_test_outcome(test_name, test_passed, failure_reason, duration)
+                
+                result_str = "PASS" if test_passed else "FAIL"
+                pbar.write(f"{result_str}: {test_name}")
+                if not test_passed:
+                    reason_str = _format_failure_reason(failure_reason, MAX_FAILURE_REASON_LENGTH)
+                    pbar.write(f"  Reason: {reason_str}")
+                    
                 pbar.update(1)
+                
+                # Update description with running totals
                 total_tests = total_passed[0] + total_failed[0]
                 pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
-                pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests}, {pass_rate:.1f}%)")
+                pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
                 pbar.refresh()
-                continue
-            try:
-                if async_result.ready():
-                    test_name, test_passed, failure_reason = async_result.get(timeout=5.0)
-                    completed.append(i)
-                    found_completion = True
-                    duration = current_time - job_start_times[i]
-                    logging.info(f"PARALLEL: Job {test_name} completed in {duration:.1f}s, success={test_passed}")
+            else:
+                # Only log when we're waiting for the last few tests (reduced frequency)
+                if len(active_jobs) <= 2:
+                    logging.info(f"PARALLEL: Waiting for {test_name} (remaining active: {len(active_jobs)})")
                     
-                    # Process the result
-                    if test_passed:
-                        total_passed[0] += 1
-                    else:
-                        total_failed[0] += 1
-                        
-                    sr[test_name] = (test_passed, failure_reason)
-                    _log_test_outcome(test_name, test_passed, failure_reason, duration)
-                    
-                    result_str = "PASS" if test_passed else "FAIL"
-                    pbar.write(f"{result_str}: {test_name}")
-                    if not test_passed:
-                        reason_str = _format_failure_reason(failure_reason, MAX_FAILURE_REASON_LENGTH)
-                        pbar.write(f"  Reason: {reason_str}")
-                        
-                    pbar.update(1)
-                    
-                    # Update description with running totals
-                    total_tests = total_passed[0] + total_failed[0]
-                    pass_rate = (total_passed[0] / total_tests * 100) if total_tests > 0 else 0
-                    pbar.set_description_str(f"Parallel ({total_passed[0]}✓/{total_failed[0]}✗/{total_tests} tests, {pass_rate:.1f}%)")
-                    pbar.refresh()
-                else:
-                    # Only log when we're waiting for the last few tests (reduced frequency)
-                    if len(completed) >= len(async_results) - 2:
-                        logging.info(f"PARALLEL: Waiting for {job_test_names[i]} (completed: {len(completed)}/{len(async_results)})")
-                        
-            except Exception as e:
-                logging.error(f"PARALLEL: Error checking/getting result for job {i} ({job_test_names[i]}): {e}")
-                completed.append(i)  # Mark as completed to avoid infinite loop
-                found_completion = True
+        except Exception as e:
+            logging.error(f"PARALLEL: Error checking/getting result for job {job_id} ({test_name}): {e}")
+            del active_jobs[job_id]
+            found_completion = True
     
     return found_completion
 
@@ -624,47 +638,49 @@ def _run_tests_parallel(test_files, pbar, test_llm, sr, total_passed, total_fail
     
     # Run tests in parallel with real-time progress updates and hanging detection
     with mp.Pool(parallel_workers, maxtasksperchild=1) as pool:
-        # Submit all jobs asynchronously
-        async_results = []
-        job_start_times = {}
-        job_test_names = {}
-        
-        for i, test_data in enumerate(all_test_data):
-            result = pool.apply_async(run_test_with_name, (test_data,))
-            async_results.append(result)
-            job_start_times[i] = time.time()
-            job_test_names[i] = test_data[0]  # test_name is first element
-            
-        logging.info(f"PARALLEL: Started {len(async_results)} jobs with {parallel_workers} workers")
-        
-        # Process results as they complete with hanging detection
-        completed = []
+        active_jobs = {}
+        next_job_index = _fill_parallel_worker_slots(pool, all_test_data, 0, active_jobs, parallel_workers)
+        logging.info(f"PARALLEL: Started {len(active_jobs)} initial jobs with {parallel_workers} workers")
+
         last_status_log = time.time()
         
-        while len(completed) < len(async_results):
+        while active_jobs:
             current_time = time.time()
             
             # Log progress for debugging last test hangs
-            if len(completed) >= len(async_results) - 1:  # Last test
-                remaining = [i for i in range(len(async_results)) if i not in completed]
-                logging.info(f"PARALLEL: Waiting for last {len(remaining)} jobs: {[job_test_names[i] for i in remaining]}")
+            if len(active_jobs) <= 1 and next_job_index >= len(all_test_data):
+                remaining = [job_info["test_name"] for job_info in active_jobs.values()]
+                logging.info(f"PARALLEL: Waiting for last {len(remaining)} jobs: {remaining}")
             
             # Periodic status logging
             if current_time - last_status_log > STATUS_LOG_INTERVAL_SECONDS:
                 running_jobs = []
-                for i, result in enumerate(async_results):
-                    if i not in completed and not result.ready():
-                        duration = current_time - job_start_times[i]
-                        running_jobs.append(f"{job_test_names[i]}({duration:.0f}s)")
+                for job_info in active_jobs.values():
+                    if not job_info["async_result"].ready():
+                        duration = current_time - job_info["started_at"]
+                        running_jobs.append(f"{job_info['test_name']}({duration:.0f}s)")
                 
                 if running_jobs:
                     logging.info(f"PARALLEL: {len(running_jobs)} jobs still running: {', '.join(running_jobs)}")
                 last_status_log = current_time
             
             # Check for completed jobs
-            found_completion = _check_completed_jobs(async_results, completed, job_start_times, 
-                                                   job_test_names, current_time, total_passed, 
-                                                   total_failed, sr, pbar)
+            found_completion = _check_completed_jobs(
+                active_jobs,
+                current_time,
+                total_passed,
+                total_failed,
+                sr,
+                pbar,
+            )
+            if found_completion:
+                next_job_index = _fill_parallel_worker_slots(
+                    pool,
+                    all_test_data,
+                    next_job_index,
+                    active_jobs,
+                    parallel_workers,
+                )
             
             # Small sleep to avoid busy waiting
             time.sleep(0.1)

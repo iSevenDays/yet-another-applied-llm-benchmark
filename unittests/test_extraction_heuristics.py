@@ -50,6 +50,50 @@ This writes 1 into memory cell 0.
         result, _ = next(evaluator("The connector is a DB‑9 serial port."))
         self.assertTrue(result)
 
+    def test_extract_code_discards_markdown_table_before_function(self):
+        node = self._setup_node(ExtractCode(lang="python"))
+
+        response = """
+Below is a stand-alone implementation.
+
+| broken syntax | replacement |
+| --- | --- |
+| `(` | `[` |
+
+def fix_json(text):
+    return text
+"""
+
+        extracted, _ = next(node(response))
+        self.assertTrue(extracted.lstrip().startswith("def fix_json"))
+        self.assertNotIn("| broken syntax |", extracted)
+        self.assertNotIn("Below is a stand-alone implementation.", extracted)
+
+    def test_extract_code_stops_before_postscript_usage_notes(self):
+        node = self._setup_node(ExtractCode(lang="python"))
+
+        response = """
+```python
+#!/usr/bin/env python3
+import sys
+
+def main():
+    print("ok")
+
+if __name__ == "__main__":
+    main()
+```
+
+1. Install Pillow if you haven't already:
+pip install pillow
+python code.py /tmp
+"""
+
+        extracted, _ = next(node(response))
+        self.assertIn('print("ok")', extracted)
+        self.assertNotIn("Install Pillow", extracted)
+        self.assertNotIn("pip install pillow", extracted)
+
 
 if __name__ == "__main__":
     unittest.main()

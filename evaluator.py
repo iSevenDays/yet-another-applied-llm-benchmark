@@ -122,6 +122,8 @@ def _looks_like_code_line(line):
     stripped = line.strip()
     if not stripped:
         return True
+    if stripped.startswith("```"):
+        return False
     if stripped.startswith(("#", "//", "/*", "*", "*/", "--")):
         return True
     if re.match(r"^[A-Za-z_][\w]*:\s*(?:;.*)?$", stripped):
@@ -140,6 +142,12 @@ def _looks_like_prose_line(line):
     stripped = line.strip()
     if not stripped:
         return False
+    if stripped.startswith("|") and stripped.endswith("|"):
+        return True
+    if re.match(r"^\d+\.\s+", stripped):
+        return True
+    if re.match(r"^(?:pip|python|python3|uv|cargo|gcc|g\+\+|rustc|node|npm|pnpm|yarn)\b", stripped):
+        return True
     if _looks_like_code_line(stripped):
         return False
     words = re.findall(r"[A-Za-z]{3,}", stripped)
@@ -155,6 +163,8 @@ def _extract_code_candidates(text):
     lines = normalized.splitlines()
     start_idx = None
     for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
         if _looks_like_code_line(line):
             start_idx = idx
             break
@@ -180,7 +190,7 @@ def _extract_code_candidates(text):
             candidates.append(candidate)
 
     raw = normalized.strip()
-    if raw and (fenced_blocks or start_idx is not None):
+    if raw and not candidates:
         candidates.append(raw)
 
     deduped = []

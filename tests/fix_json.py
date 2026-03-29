@@ -17,10 +17,9 @@ test_case, answer = make_python_test([("""fix_json('''{"a": 5, "b": [3, 4]}''')"
                                       ("""fix_json('''{'True': False, 'b()': (3, 4), "c'": []}''')""", """{"True": False, "b()": [3, 4], "c'": []}"""),
                                       ])
 
-TestFixJSON = question >> LLMRun() >> ExtractCode(keep_main=False) >> PythonRun(test_case) >> SubstringEvaluator(answer)
-TestFixJSONHelp = (question+help_err) >> LLMRun() >> ExtractCode(keep_main=False) >> PythonRun(test_case) >> SubstringEvaluator(answer)
+TestFixJSON = question >> LLMRun() >> ExtractCode(keep_main=False, lang="python") >> PythonRun(test_case) >> SubstringEvaluator(answer)
+TestFixJSONHelp = (question+help_err) >> LLMRun() >> ExtractCode(keep_main=False, lang="python") >> PythonRun(test_case) >> SubstringEvaluator(answer)
 
 
 if __name__ == "__main__":
     print(run_test(TestFixJSONHelp))
-
